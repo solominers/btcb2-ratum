@@ -1109,6 +1109,36 @@ def hash_limit(stack: Stack, a: argparse.Namespace) -> None:
     stack.print_ledger(stack.stop_and_dump_ledger())
 
 
+def sandbox(stack: Stack, a: argparse.Namespace) -> None:
+    """The node, the pool (with a fee, the finder's cut and a hashrate limit), two gateways
+    and two miners with named rigs, kept running for --minutes so the web apps can be run
+    against the pool. Prints the stats port and the pool's data directory."""
+    stack.require_tools("taskset")
+    stack.build_release()
+    stack.start_node()
+    stack.mine_through_activation()
+    step("starting ratum-prime with a fee, the finder's cut and a hashrate limit")
+    stack.start_pool(
+        "--window", WINDOW_MULTIPLE,
+        "--fee", f"{CAROL}=25",
+        "--finder-bps", "8000",
+        "--hash-limit", "1m=100T,2h=3.5T",
+    )
+    gateways = {"A": GATEWAY_A_ADDRESS, "B": GATEWAY_B_ADDRESS}
+    ports = {"A": free_port(23300, 90), "B": free_port(23400, 90)}
+    for name, api_base in (("A", 7100), ("B", 7200)):
+        stack.start_gateway(name, ports[name], free_port(api_base, 90), gateways[name], name)
+    alice_cpus, bob_cpus = cpu_spans(2)
+    stack.start_miner(f"{ALICE}.rig1", "alice", ports["A"], alice_cpus)
+    stack.start_miner(f"{BOB}.garage", "bob", ports["B"], bob_cpus)
+    print(f"sandbox: stats port {stack.stats_port}", flush=True)
+    print(f"sandbox: pool dir {stack.work / 'pool'}", flush=True)
+    print(f"sandbox: pool log {stack.pool_log_path}", flush=True)
+    print(f"sandbox: running for {a.minutes} minutes", flush=True)
+    time.sleep(a.minutes * 60)
+    step("sandbox: done")
+
+
 def main() -> int:
     home = Path.home() / "src/bitcoin/build/bin"
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1151,6 +1181,10 @@ def main() -> int:
     hl = runs.add_parser("hash-limit", help="a miner over the hashrate limit banned and the control socket commands")
     hl.add_argument("--timeout", type=float, default=900, help="seconds to wait for each step")
     hl.set_defaults(scenario=hash_limit)
+
+    sb = runs.add_parser("sandbox", help="keep a node, the pool, two gateways and two miners running for the web apps")
+    sb.add_argument("--minutes", type=float, default=30, help="how long to keep the stack up")
+    sb.set_defaults(scenario=sandbox)
 
     a = ap.parse_args()
     stack = Stack(a.run, a)

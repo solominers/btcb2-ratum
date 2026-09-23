@@ -79,12 +79,12 @@ impl Workers {
             self.forget_quietest_identity();
         }
         let workers = self.by_identity.entry(identity.to_string()).or_default();
-        if !workers.contains_key(worker) && workers.len() >= MAX_WORKERS_PER_IDENTITY {
-            if let Some(quietest) =
+        if !workers.contains_key(worker)
+            && workers.len() >= MAX_WORKERS_PER_IDENTITY
+            && let Some(quietest) =
                 workers.iter().min_by_key(|(_, w)| w.last_share_at).map(|(name, _)| name.clone())
-            {
-                workers.remove(&quietest);
-            }
+        {
+            workers.remove(&quietest);
         }
         let w = workers.entry(worker.to_string()).or_insert_with(|| Worker {
             last_share_at: now,
