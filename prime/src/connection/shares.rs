@@ -539,6 +539,18 @@ impl Connection<'_> {
                 "[{peer}]   !! gateway flagged a block but the hash does not meet its job's bits"
             );
         }
+        // A connection whose hello named no identity takes the first accepted share's, before
+        // the block (if this is one) is recorded, so what its coinbase owes names the finder.
+        if self.identity.is_none() {
+            let identity = identity_of(&s.username);
+            if payout::address_script(&identity, self.server.share_policy.chain).is_some() {
+                info!(
+                    "[{peer}]      {identity} is this connection's identity: the finder's cut of \
+                     every split dictated to it from now on"
+                );
+                self.identity = Some(identity.into_owned());
+            }
+        }
         // The block is relayed and the share credited before the receipt is written, so a
         // failed write to the gateway, which ends the connection, loses neither: under an
         // anti-block-withholding assignment the pool is the only submitter of the block, and a
@@ -579,13 +591,6 @@ impl Connection<'_> {
                  credited, and is answered as refused"
             );
             return ShareVerdict::Rejected(RejectReason::Other);
-        }
-        if self.identity.is_none() {
-            info!(
-                "[{peer}]      {identity} is this connection's identity: the finder's cut of \
-                 every split dictated to it from now on"
-            );
-            self.identity = Some(identity.to_string());
         }
         lock(&self.server.workers).note(
             &identity,

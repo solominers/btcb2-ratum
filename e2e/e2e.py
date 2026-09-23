@@ -688,6 +688,29 @@ def full_stack(stack: Stack, a: argparse.Namespace) -> None:
 
     check_block_endpoint_for_pooled_blocks(stack, first_pooled)
 
+    if a.expect_finder_bps:
+        # The miner's address is the connection's identity (the first credited share's, or
+        # the gateway's hello): its output carries the finder's cut, merged with its window
+        # share, so it is at least the cut of the value after the fee.
+        step(f"each pooled coinbase pays the miner's address at least {a.expect_finder_bps} bps of the value")
+        for height in range(first_pooled, target + 1):
+            _, block = stack.block(height)
+            value = stack.coinbase_value(block)
+            paid = stack.coinbase_outputs(block, [MINER_ADDRESS]).get(MINER_ADDRESS, 0)
+            cut = value * a.expect_finder_bps // BASIS_POINTS
+            if paid < cut:
+                # A gateway whose hello names no identity (the C gateway) is dictated nothing
+                # until its first share: a block found on that first job pays the pool's
+                # script everything, and the pool owes it in full, the cut included.
+                found = stack.cli("getblockhash", str(height))
+                owed = [o for o in stack.stats()["owed"]["blocks"] if o["block_hash"] == found]
+                due = sum(m["sats"] for o in owed for m in o["miners"] if m["identity"] == MINER_ADDRESS)
+                if due < cut:
+                    fail(f"height {height}: {MINER_ADDRESS} was paid {paid} of {value} sats, under the finder's cut of {cut}, and is owed {due}")
+                print(f"  height {height}: paid {paid}; the pool owes the miner's address {due} of {value} sats (cut {cut}): dictated before its identity was known")
+                continue
+            print(f"  height {height}: {paid} of {value} sats to the miner's address (cut {cut})")
+
     step(
         f"passed: height {target} is {block_hash}: a 164-byte header mined through the stack "
         f"({a.blocks} pooled block(s))"
@@ -1160,6 +1183,9 @@ def main() -> int:
                     help="the gateway's mining.pool_address; the C gateway decodes bc1/tb1 only")
     fs.add_argument("--prime-args", default="",
                     help="extra ratum-prime flags, split on whitespace")
+    fs.add_argument("--expect-finder-bps", type=int, default=0,
+                    help="check that each pooled coinbase pays the miner's address at least this "
+                    "share of the value (give --prime-args '--finder-bps N' too)")
     fs.set_defaults(scenario=full_stack)
 
     mm = runs.add_parser("multi-miner", help="three miners behind two gateways: credit and payout split")

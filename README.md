@@ -492,9 +492,13 @@ the miners of every gateway in proportion to their weight in the window, the fin
 window share included (paid in one output with its cut). A connection's identity is the
 address its hello names in the identity extension `ratum-gateway` sends (its
 `mining.pool_address`, when that is an address of the chain), else the identity of the first
-share credited on it; either is named in the log. A split dictated to a C gateway before its
-first share carries no finder's cut, and a gateway carrying several usernames pays its cut to
-its one identity, whichever of them found the block. Each identity (one payout address) is one
+share credited on it; either is named in the log. A connection whose identity is not yet
+known (a C gateway before its first share), while a finder's cut is set, is dictated no
+outputs at all rather than a split without the cut: a block found on such a job pays its whole
+value to the pool's payout script and is recorded as owed in full, the fees, the finder's cut
+and the window's split, for the operator to pay by hand and settle (see "Owed blocks"). A
+gateway carrying several usernames pays its cut to its one identity, whichever of them found
+the block. Each identity (one payout address) is one
 ticket: the finder's cut is what a ticket wins, and the window is what every ticket earns.
 
 A miner's identity is its stratum username up to the first `.`,

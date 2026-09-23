@@ -186,6 +186,21 @@ pub fn dictate(
     coinbaser_id: u8,
     finder: Option<&str>,
 ) -> (Vec<DictatedOutput>, Vec<CarryDelta>, Vec<u8>) {
+    // A connection whose identity is not yet known (a gateway whose hello named none, before
+    // its first share) is dictated nothing while a finder's cut is set: a split without the
+    // cut would pay the cut to the window and lose it, while a coinbase paying the pool's
+    // script alone is recorded as owed, with the cut, if a block is found on it.
+    if finder.is_none() && lock(&server.ledger).split_policy().finder_bps > 0 {
+        info!(
+            "[{peer}]      dictating no outputs: the connection's identity is not known yet \
+             (no identity in its hello, no share credited), and the finder's cut needs it; a \
+             block found on this job is owed in full"
+        );
+        let payload = CoinbaserResponse { value, coinbaser_id, outputs: Vec::new() }
+            .encode()
+            .expect("an empty split encodes");
+        return (Vec::new(), Vec::new(), payload);
+    }
     let plan = plan(server, value, finder);
     let (fee_outputs, window_shares, window_work) =
         (plan.fees.len(), plan.window_shares, plan.window_work);
@@ -264,6 +279,22 @@ mod tests {
             1,
             "a cut under the minimum: none"
         );
+    }
+
+    #[test]
+    fn a_connection_without_an_identity_is_dictated_nothing_while_a_finders_cut_is_set() {
+        const PEER: SocketAddr =
+            SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 1);
+        let server = server_with(&[(ALICE, 3), (BOB, 1)]);
+        let (outputs, carry, _) = dictate(&server, PEER, 1_000_000, 1, None);
+        assert_eq!(outputs.len(), 2, "no cut set: the window is dictated");
+        lock(&server.ledger).set_finder_bps(8_000);
+        let (outputs, carry2, _) = dictate(&server, PEER, 1_000_000, 2, None);
+        assert!(outputs.is_empty(), "the cut needs an identity: nothing is dictated");
+        assert!(carry2.is_empty(), "nobody was left out of a split that paid nobody");
+        let (outputs, _, _) = dictate(&server, PEER, 1_000_000, 3, Some(CAROL));
+        assert_eq!(outputs.len(), 3, "the cut to carol and the window");
+        assert!(carry.is_empty());
     }
 
     #[test]
