@@ -14,6 +14,11 @@ version 2 work.
   e2e/e2e.py multi-miner         three miners behind two gateways: credit and payout split
   e2e/e2e.py public-gateway-fee  a tagged gateway's shares charged, the fee paid to the
                                  other gateway's miner
+  e2e/e2e.py finder-split        an operator fee, the finder's cut to the gateway that found
+                                 the block, the window paid the rest
+  e2e/e2e.py hash-limit          a miner over the hashrate limit banned, its shares refused,
+                                 the ban listed, ended and a setting changed over the
+                                 control socket
 
 Every run needs a Bitcoin Knots build with the BLAKE2b change, named by BITCOIND and
 BITCOIN_CLI (default ~/src/bitcoin/build/bin/); the gateway is this workspace's
@@ -56,6 +61,10 @@ ALICE = "bcrt1q5xs6rgdp5xs6rgdp5xs6rgdp5xs6rgdpa854mc"
 BOB = "bcrt1qk2et9v4jk2et9v4jk2et9v4jk2et9v4jldyv0a"
 CAROL = "bcrt1qc0pu8s7rc0pu8s7rc0pu8s7rc0pu8s7rpz2hyw"
 GATEWAY_ADDRESS = "bcrt1q6n2df4x56n2df4x56n2df4x56n2df4x5jumwup"
+# One address per gateway for the finder-split run, so the finder's cut names the gateway
+# that found the block; CAROL is the operator fee's address there.
+GATEWAY_A_ADDRESS = "bcrt1quhj7te09uhj7te09uhj7te09uhj7te09d4ev4p"
+GATEWAY_B_ADDRESS = "bcrt1q7mm0dahk7mm0dahk7mm0dahk7mm0dahk0lf4py"
 
 # The window multiple is set so that at regtest's difficulty the window holds far more work
 # than a run produces, so no share is trimmed and the split for every block is computable
@@ -452,6 +461,17 @@ class Stack:
         argv = [str(ROOT / "target/release/sia-test-miner"), f"127.0.0.1:{port}", user]
         self.miners.append(self.spawn(argv, self.work / f"miner-{name}.log", cpus=cpus))
 
+    def prime_command(self, *args: str) -> str:
+        """A ledger or settings command run against the pool's data directory, which the
+        running pool executes over its control socket; its stdout."""
+        argv = [str(ROOT / "target/release/ratum-prime"), "--data-dir", str(self.work / "pool"), *args]
+        r = subprocess.run(argv, capture_output=True, text=True)
+        if r.returncode != 0:
+            fail(f"ratum-prime {' '.join(args)}: exit {r.returncode}: {r.stderr.strip()}")
+        if "executed by the pool" not in r.stderr:
+            fail(f"ratum-prime {' '.join(args)} did not reach the running pool: {r.stderr.strip()}")
+        return r.stdout
+
     def stop_and_dump_ledger(self) -> list[Share]:
         """Stops the miners, then the pool, so no share is credited after the last block on
         the chain and the pool releases the ledger's lock (a redb database), then dumps the
@@ -483,6 +503,15 @@ class Stack:
                 return r.status, json.load(r)
         except urllib.error.HTTPError as e:
             return e.code, json.load(e)
+        except (urllib.error.URLError, OSError) as e:
+            fail(f"{url}: {e}")
+
+    def stats(self) -> dict:
+        """The pool's /stats.json."""
+        url = f"http://127.0.0.1:{self.stats_port}/stats.json"
+        try:
+            with urllib.request.urlopen(url, timeout=30) as r:
+                return json.load(r)
         except (urllib.error.URLError, OSError) as e:
             fail(f"{url}: {e}")
 
@@ -907,6 +936,179 @@ def public_gateway_fee(stack: Stack, a: argparse.Namespace) -> None:
     stack.print_ledger(ledger)
 
 
+def finder_split(stack: Stack, a: argparse.Namespace) -> None:
+    """Two gateways, each with its own payout address and one miner: an operator fee to a
+    third address, the finder's cut of the rest to the address of the gateway whose session
+    found the block (named in its hello), and the window paid what is left, pro rata."""
+    fee_bps, finder_bps = 100, 5000
+    stack.require_tools("taskset")
+    stack.build_release()
+    stack.start_node()
+    stack.mine_through_activation()
+
+    step(f"starting ratum-prime: fee {fee_bps} bps to carol, finder's cut {finder_bps} bps")
+    stack.start_pool(
+        "--window", WINDOW_MULTIPLE,
+        "--fee", f"{CAROL}={fee_bps}",
+        "--finder-bps", str(finder_bps),
+    )
+    gateways = {"A": GATEWAY_A_ADDRESS, "B": GATEWAY_B_ADDRESS}
+    ports = {"A": free_port(23300, 90), "B": free_port(23400, 90)}
+    for name, api_base in (("A", 7100), ("B", 7200)):
+        step(f"starting gateway {name} on stratum port {ports[name]}, paying {gateways[name]}")
+        stack.start_gateway(name, ports[name], free_port(api_base, 90), gateways[name], name)
+    log = stack.pool_log()
+    for address in gateways.values():
+        if f"{address} is this connection's identity (from its hello)" not in log:
+            fail(f"the pool did not take {address} from a gateway's hello; see {stack.pool_log_path}")
+
+    step("starting miners: alice on gateway A, bob on gateway B")
+    alice_cpus, bob_cpus = cpu_spans(2)
+    stack.start_miner(f"{ALICE}.rig", "alice", ports["A"], alice_cpus)
+    stack.start_miner(f"{BOB}.rig", "bob", ports["B"], bob_cpus)
+
+    step(f"accumulating {a.shares} shares from each miner (up to {a.timeout}s)")
+
+    def enough() -> bool:
+        acc = stack.acceptances()
+        return all(sum(x.identity == m for x in acc) >= a.shares for m in (ALICE, BOB))
+
+    if not stack.wait_until(
+        enough, a.timeout,
+        lambda: f"{len(stack.acceptances())} shares accepted at height {stack.height()}",
+    ):
+        fail(f"fewer than {a.shares} shares from each miner in {a.timeout}s; see {stack.pool_log_path}")
+    check_block_endpoint_for_pooled_blocks(stack, ACTIVATION_HEIGHT + 1)
+    log = stack.pool_log()
+    ledger = stack.stop_and_dump_ledger()
+
+    step("each block pays the fee, the finder's cut to the finding gateway, and the window")
+    addresses = [ALICE, BOB, CAROL, *gateways.values()]
+    checked = 0
+    finders = {address: 0 for address in gateways.values()}
+    for height in range(ACTIVATION_HEIGHT + 1, stack.height() + 1):
+        block_hash, block = stack.block(height)
+        recorded = stack.acceptance_of(block_hash)
+        paid = stack.coinbase_outputs(block, addresses)
+        value = stack.coinbase_value(block)
+        if sum(paid.values()) != recorded.split:
+            fail(f"height {height}: the pool recorded split={recorded.split} but the coinbase pays {sum(paid.values())}")
+        fee = value * fee_bps // BASIS_POINTS
+        fee = fee if fee >= MIN_PAYOUT else 0
+        if paid.get(CAROL, 0) != fee:
+            fail(f"height {height}: the fee output pays carol {paid.get(CAROL, 0)}, not {fee} ({fee_bps} bps of {value})")
+        after_fee = value - fee
+        cut = after_fee * finder_bps // BASIS_POINTS
+        paid_gateways = [g for g in gateways.values() if g in paid]
+        if len(paid_gateways) != 1:
+            fail(f"height {height}: the coinbase pays {len(paid_gateways)} gateway addresses, not one: {paid}")
+        finder = paid_gateways[0]
+        if paid[finder] != cut:
+            fail(f"height {height}: the finder's cut is {paid[finder]}, not {cut} ({finder_bps} bps of {after_fee})")
+        # The gateway paid the cut is the one whose session the winning share came in on.
+        if f"[{recorded.peer}]      {finder} is this connection's identity" not in log:
+            fail(f"height {height}: {finder} was paid the cut but the block came in on {recorded.peer}, not that gateway's session")
+        finders[finder] += 1
+        window_value = after_fee - cut
+        window_paid = {k: v for k, v in paid.items() if k in (ALICE, BOB)}
+        k = stack.ledger_index_of(ledger, block_hash)
+        matched = match_split(ledger, k, window_value, MIN_PAYOUT, window_paid)
+        if not matched:
+            fail(f"height {height}: the window's {window_value} sats are not the split of any recent window: {window_paid}")
+        checked += 1
+        print(
+            f"  height {height:<3} {value} sats: fee {fee}, finder's cut {cut} to gateway "
+            f"{'A' if finder == GATEWAY_A_ADDRESS else 'B'}, window {window_value} pro rata over {matched[0]} shares"
+        )
+    if checked == 0:
+        fail("no pooled block to check")
+    step(f"passed: {checked} blocks; found through gateway A: {finders[GATEWAY_A_ADDRESS]}, B: {finders[GATEWAY_B_ADDRESS]}")
+    stack.print_ledger(ledger)
+
+
+def hash_limit(stack: Stack, a: argparse.Namespace) -> None:
+    """One gateway and one miner under a hashrate limit no miner is under: the first
+    accepted share bans the miner's address, the shares after it are refused with
+    HashLimit and the gateway tells its miners, `--bans` lists the ban, `--unban` ends it
+    and shares are accepted again, and `--set` changes a live setting the running pool
+    then shows."""
+    stack.require_tools()
+    stack.build_release()
+    stack.start_node()
+    stack.mine_through_activation()
+
+    step("starting ratum-prime with a 1 H/s limit over 1 minute, bans of 1 hour")
+    stack.start_pool("--hash-limit", "1m=1", "--ban-secs", "3600")
+    stratum_port, api_port = free_port(23300, 90), free_port(7100, 90)
+    step(f"starting the gateway on stratum port {stratum_port}")
+    stack.start_gateway("A", stratum_port, api_port, GATEWAY_ADDRESS, "e2e")
+    step("mining until the first share is accepted and the miner banned")
+    stack.start_miner(f"{MINER_ADDRESS}.rig1", "rig1", stratum_port)
+    if not stack.wait_until(
+        lambda: f"{MINER_ADDRESS} banned until" in stack.pool_log(), a.timeout,
+        lambda: f"{len(stack.acceptances())} share(s) accepted",
+    ):
+        fail(f"no ban within {a.timeout}s; see {stack.pool_log_path}")
+    accepted_before = len(stack.acceptances())
+    print(f"  banned after {accepted_before} accepted share(s)")
+
+    step("the shares after the ban are refused with HashLimit and the gateway tells its miners")
+    gateway_log = stack.work / "gateway-A.log"
+    if not stack.wait_until(
+        lambda: "HashLimit (45)" in gateway_log.read_text(errors="replace"), a.timeout,
+        lambda: "waiting for a refused share",
+    ):
+        fail(f"the gateway logged no HashLimit refusal within {a.timeout}s; see {gateway_log}")
+    if "client.show_message" not in gateway_log.read_text(errors="replace") and "over the pool's hashrate limit" not in gateway_log.read_text(errors="replace"):
+        fail(f"the gateway did not tell its miners; see {gateway_log}")
+    if len(stack.acceptances()) != accepted_before:
+        fail("a share was accepted after the ban")
+    stats = stack.stats()
+    bans = stats["limiter"]["bans"]
+    if len(bans) != 1 or bans[0]["identity"] != MINER_ADDRESS:
+        fail(f"/stats.json limiter.bans is {bans}")
+    print(f"  ban: {bans[0]['reason']}")
+
+    step("the ban is listed and ended over the control socket, and shares are accepted again")
+    out = stack.prime_command("--bans")
+    if MINER_ADDRESS not in out:
+        fail(f"--bans did not list the miner: {out!r}")
+    out = stack.prime_command("--unban", MINER_ADDRESS)
+    if "is ended" not in out:
+        fail(f"--unban: {out!r}")
+    if not stack.wait_until(
+        lambda: len(stack.acceptances()) > accepted_before, a.timeout,
+        lambda: f"{len(stack.acceptances())} share(s) accepted",
+    ):
+        fail(f"no share accepted within {a.timeout}s of the unban; see {stack.pool_log_path}")
+    # The limit is one no share is under, so the share accepted after the unban bans the
+    # address again: the second ban, counted.
+    bans = stack.stats()["limiter"]["bans"]
+    if bans and bans[0]["times"] != 2:
+        fail(f"/stats.json lists a ban that is not the second one: {bans}")
+    print(f"  after the unban: {len(stack.acceptances()) - accepted_before} share(s) accepted, then banned again")
+
+    step("a live setting changed with --set is written to the file and shown by the pool")
+    out = stack.prime_command("--set", "finder-bps=1234", "--set", "hash-limit=")
+    if "finder-bps: 1234" not in out:
+        fail(f"--set: {out!r}")
+    out = stack.prime_command("--show-settings")
+    if "finder-bps: 1234 (12.34%)" not in out or "hash-limit: none" not in out:
+        fail(f"--show-settings: {out!r}")
+    written = (stack.work / "pool" / "ratum.toml").read_text()
+    if "finder-bps = 1234" not in written or "hash-limit" in written:
+        fail(f"the settings file was not written as set: {written!r}")
+    # The stats snapshot is taken once a second.
+    if not stack.wait_until(
+        lambda: stack.stats()["pool"]["finder_bps"] == 1234, 30,
+        lambda: "waiting for /stats.json to report the new finder's cut",
+    ):
+        fail("/stats.json does not report the new finder's cut")
+
+    step("passed: banned, refused, told, listed, unbanned, accepted again; a setting changed live")
+    stack.print_ledger(stack.stop_and_dump_ledger())
+
+
 def main() -> int:
     home = Path.home() / "src/bitcoin/build/bin"
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -940,6 +1142,15 @@ def main() -> int:
     pf.add_argument("--bob-shares", type=int, default=2, help="shares from the miner on the own gateway")
     pf.add_argument("--timeout", type=float, default=5400, help="seconds to wait for them")
     pf.set_defaults(scenario=public_gateway_fee)
+
+    fsp = runs.add_parser("finder-split", help="an operator fee, the finder's cut to the finding gateway, the window the rest")
+    fsp.add_argument("--shares", type=int, default=3, help="shares from each miner before checking")
+    fsp.add_argument("--timeout", type=float, default=5400, help="seconds to wait for them")
+    fsp.set_defaults(scenario=finder_split)
+
+    hl = runs.add_parser("hash-limit", help="a miner over the hashrate limit banned and the control socket commands")
+    hl.add_argument("--timeout", type=float, default=900, help="seconds to wait for each step")
+    hl.set_defaults(scenario=hash_limit)
 
     a = ap.parse_args()
     stack = Stack(a.run, a)
