@@ -366,6 +366,7 @@ class Stack:
             "--payout-address", POOL_ADDRESS,
             "--coinbase-tag", "RATUM",
             "--min-diff", "1", "--poll", "1",
+            "--finder-bps", "0",
             "--stats-listen", f"127.0.0.1:{self.stats_port}",
             *extra_args,
         ]

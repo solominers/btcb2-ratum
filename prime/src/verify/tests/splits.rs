@@ -250,7 +250,7 @@ fn a_split_named_by_a_job_on_another_parent_or_worth_other_than_its_coinbase_is_
 
     let (mut v, s) = setup();
     let outputs: Vec<DictatedOutput> = Vec::new();
-    v.record_dictated(1, COINBASE_VALUE, [0x11; 32], outputs, NOW);
+    v.record_dictated(1, COINBASE_VALUE, [0x11; 32], outputs, Vec::new(), NOW);
     assert_eq!(
         v.rebuild_checked_ignoring_target(&s, None, NOW),
         Err(RejectReason::BadCoinbaserId),
@@ -264,14 +264,14 @@ fn a_session_keeps_its_newest_splits_and_shares_outputs_that_repeat() {
     let outputs =
         || vec![DictatedOutput { payout: payout("alice", 5), script_pubkey: p2wpkh(0x01) }];
     for id in 1..=100u8 {
-        splits.record(id, 5, [0x5a; 32], outputs(), NOW);
+        splits.record(id, 5, [0x5a; 32], outputs(), Vec::new(), NOW);
     }
     assert_eq!(splits.len(), MAX_SPLITS);
     assert!(splits.get(100 - MAX_SPLITS as u8).is_none(), "the oldest was dropped");
     let (a, b) = (splits.get(99).unwrap(), splits.get(100).unwrap());
     assert!(Arc::ptr_eq(&a.outputs, &b.outputs), "consecutive equal outputs are held once");
 
-    splits.record(101, 5, [0x11; 32], outputs(), NOW);
+    splits.record(101, 5, [0x11; 32], outputs(), Vec::new(), NOW);
     splits.retain_prev(|prev| *prev == [0x11; 32]);
     assert_eq!(splits.len(), 1);
     assert!(splits.get(101).is_some());
@@ -282,9 +282,9 @@ fn a_saved_session_keeps_the_newest_few_splits_on_the_tip() {
     let (mut v, _) = setup();
     v.set_tip(Some([0x5a; 32]), NOW);
     for id in 2..=20u8 {
-        v.record_dictated(id, COINBASE_VALUE, [0x5a; 32], Vec::new(), NOW);
+        v.record_dictated(id, COINBASE_VALUE, [0x5a; 32], Vec::new(), Vec::new(), NOW);
     }
-    v.record_dictated(21, COINBASE_VALUE, [0x11; 32], Vec::new(), NOW);
+    v.record_dictated(21, COINBASE_VALUE, [0x11; 32], Vec::new(), Vec::new(), NOW);
     let saved = v.take_splits();
     assert_eq!(saved.len(), SAVED_SPLITS);
     assert!(saved.get(21).is_none(), "another parent");

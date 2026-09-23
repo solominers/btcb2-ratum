@@ -161,10 +161,12 @@ fn raise_open_file_limit(max_connections: usize) {
 fn report_settings(s: &Settings, ledger: &Ledger, limiter: &limiter::Limiter) {
     let (window, split) = (ledger.window_rule(), ledger.split_policy());
     info!(
-        "payouts: window {}x network difficulty ({} at startup), operator fee: {}",
+        "payouts: window {}x network difficulty ({} at startup), operator fee: {}, finder's \
+         cut {} bps of what the fees leave",
         window.multiple,
         ledger.window(),
-        live::fees_text(&split.fees)
+        live::fees_text(&split.fees),
+        split.finder_bps
     );
     if let Some(gateway) = split.public_gateway.as_ref().filter(|g| g.fee_bps > 0) {
         info!(
@@ -209,6 +211,7 @@ fn main() -> io::Result<()> {
     info!("pool payout script: {}", hex::encode(&share.config.payout_script));
     let fees = settings::fees(&options, chain).unwrap_or_else(|e| cli::fatal!("{e}"));
     let rules = settings::limiter_rules(&options).unwrap_or_else(|e| cli::fatal!("{e}"));
+    let finder_bps = settings::finder_bps(&options).unwrap_or_else(|e| cli::fatal!("{e}"));
 
     // Bound before the ledger opens, so a second pool on the data directory is refused here,
     // naming this one; dropped when main returns, which removes the socket file. A socket
@@ -229,6 +232,7 @@ fn main() -> io::Result<()> {
 
     let mut ledger = Ledger::new(window, split);
     ledger.set_fees(fees);
+    ledger.set_finder_bps(finder_bps);
     if let Some(t) = tip {
         ledger.set_network_difficulty(t.difficulty);
     }

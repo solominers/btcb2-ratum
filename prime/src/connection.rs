@@ -157,6 +157,7 @@ pub fn handle(stream: TcpStream, server: &Server) -> io::Result<()> {
         resumed_from: None,
         proven: false,
         bulk: Reassembler::new(),
+        identity: None,
     };
 
     match protocol_version {
@@ -193,6 +194,9 @@ struct Connection<'a> {
     last_send_at: Instant,
     client_sign_pk: [u8; 32],
     v3: Option<V3Session>,
+    /// The identity of the first share credited on this connection: the one address this
+    /// gateway is a ticket for, paid the finder's cut in every split dictated to it after.
+    identity: Option<String>,
     /// The token of the saved session this connection holds a copy of, until `proven`
     /// removes that session from the store.
     resumed_from: Option<ResumeToken>,
@@ -459,13 +463,16 @@ impl Connection<'_> {
             return Ok(());
         }
         let coinbaser_id = self.verifier.next_coinbaser_id();
-        let (dictated, payload) = payout::dictate(self.server, peer, req.value, coinbaser_id);
+        let finder = self.identity.clone();
+        let (dictated, carry, payload) =
+            payout::dictate(self.server, peer, req.value, coinbaser_id, finder.as_deref());
         let outputs = dictated.len();
         self.verifier.record_dictated(
             coinbaser_id,
             req.value,
             req.prev_hash,
             dictated,
+            carry,
             ratum::unix_now(),
         );
         self.send_mining(&payload, false)?;

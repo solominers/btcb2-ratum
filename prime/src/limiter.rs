@@ -25,7 +25,7 @@ use std::time::Duration;
 
 /// The bans by identity: since, until, times banned, and the reason of the newest ban. A row
 /// stays after its ban ends, since `times` is what escalation counts.
-const BANS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("bans");
+pub(crate) const BANS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("bans");
 
 /// How far back a share's header time may place it: what the gateway's stale-share rule lets
 /// it replay after a reconnect (`share_stale_seconds + work_update_seconds`, 270 s at most).

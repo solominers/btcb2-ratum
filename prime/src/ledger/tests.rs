@@ -388,7 +388,7 @@ fn weights_total_the_window() {
                 let l = tagged_ledger(gateway, SHARES);
                 let w = l.weights();
                 let total: u128 =
-                    w.entries.iter().map(|(_, w)| w).sum::<u128>() + w.retained_by_pool;
+                    w.entries.iter().map(|e| e.window).sum::<u128>() + w.retained_by_pool;
                 assert_eq!(
                     total,
                     l.total_work(),

@@ -300,6 +300,7 @@ min-diff = 16384                          # smallest share difficulty credited, 
 | `--window <multiple>` | 8 | the window's work as a multiple of the network difficulty |
 | `--ledger-keep-shares <n>` | keep all | the shares retained on disk (see "Ledger and window") |
 | `--fee <address>=<bps>,...` | none | the operator fees, each an output of the coinbase; live (see "Live settings") |
+| `--finder-bps <n>` | 8000 | the finder's cut of what the fees leave, in basis points; live (see "The split") |
 | `--watch-config <bool>` | true | re-read the settings file when it changes (see "Live settings") |
 | `--hash-limit <period>=<rate>,...` | none | the hashrate brackets an identity may not exceed; live (see "Hashrate limiter") |
 | `--ban-secs <n>` | 86400 | how long a ban runs; live |
@@ -474,8 +475,17 @@ served sets the other end of that range: at a floor of 8192 a 1 TH/s miner submi
 
 ### The split
 
-One ledger serves every gateway; a block found by any pays the miners of all, in proportion
-to their work in the window. A miner's identity is its stratum username up to the first `.`,
+One ledger serves every gateway. A block's value goes, in this order: the operator fees, as
+their own outputs; the finder's cut, `--finder-bps` of what the fees leave (8000, 80%, by
+default; live), to the identity of the connection the split was dictated to; and the rest to
+the miners of every gateway in proportion to their weight in the window, the finder's own
+window share included (paid in one output with its cut). A connection's identity is the
+identity of the first share credited on it, named in the log; a split dictated before that
+first share carries no finder's cut, and a gateway carrying several usernames pays its cut to
+that first one, whichever of them found the block. Each identity (one payout address) is one
+ticket: the finder's cut is what a ticket wins, and the window is what every ticket earns.
+
+A miner's identity is its stratum username up to the first `.`,
 with a bech32 address written all in uppercase lowercased, since both forms pay one script (a
 base58 address is kept as written, and identities a ledger already holds stay as stored),
 and it must be a P2PKH, P2SH, P2WPKH, P2WSH or P2TR address with the prefixes of the chain the
@@ -485,8 +495,9 @@ for `stratum.require_address_username`, so a witness version above 1, the pay-to
 address and an address of another chain are refused. A pool that started without an answer
 from the node, which only a memory-only ledger does, accepts the prefixes of every chain, for
 identities and for `--payout-address`. An identity past the 512 outputs a gateway accepts, or
-one whose amount would fall under 546 sats (the P2PKH dust threshold), is dropped before the split's denominator is
-summed, so the miners that remain divide the whole value between them. An identity in the
+one whose amount would fall under 546 sats (the P2PKH dust threshold), is left out before the
+split's denominator is summed, so the miners that remain divide the whole value between them,
+and its window weight is carried (see "Carried work"). An identity in the
 window that is not such an address when the split is built (a share an earlier version of the
 pool credited) is dropped after the amounts are computed, so its amount stays in the coinbase
 value that reaches the pool's payout script as the remainder.
@@ -499,6 +510,24 @@ down, so the fees reach their addresses in the coinbase itself and never pass th
 pool's payout script; the miners' split is what is left. A fee whose amount would fall under
 546 sats is not taken. The fee outputs count against the 512 outputs a split may carry. The
 fees are live settings: a change applies to the next split dictated, without a restart.
+
+#### Carried work
+
+An identity left out of a split is owed by the miners who divided the block without it: its
+window weight in that split is carried, and added to its weight in the splits that follow, so
+it takes a little more of a later block and the others a little less, until a split pays it,
+when its carry is spent. An identity with a carry and no share left in the window is still in
+the split, so a miner that stopped is still paid what it was left out of. Every sat still
+reaches miners through a coinbase, and the pool holds nothing: a carry is settled only by a
+later block, so a carry no block ever settles (the identity gone for good, the pool stopped)
+is simply what the other miners kept, as it would have been without the carry. The carry
+changes only when a block is found, by the deltas of the split that block's coinbase used;
+the deltas are recorded under the block's hash, and `--void-block` returns the carry the
+block moved. A carry that has not changed for 30 days is dropped when the ledger opens.
+`/stats.json` reports each miner's `carry_work` and the window's `carry_work` and
+`carry_identities`. With the finder's cut, the output count (512 less the fee and finder
+outputs) is what leaves identities out once the pool has more tickets than that, and the
+carry turns it into a rotation: whoever was left out rises into the paid set on a later block.
 
 A split pays each identity its part of the value it was dictated for, so a share whose job
 names a split dictated for another previous block, or for a value other than the job's
@@ -617,8 +646,8 @@ the bans under `limiter` and each banned miner's `banned_until`, `--bans` prints
 
 ### Live settings
 
-The settings named live in the table under "Configuration" (`fee`, `hash-limit`, `ban-secs`,
-`ban-escalation`) apply while the pool runs;
+The settings named live in the table under "Configuration" (`fee`, `finder-bps`,
+`hash-limit`, `ban-secs`, `ban-escalation`) apply while the pool runs;
 every other setting applies at a restart. The pool reads them from its settings file
 (`--config`, or `ratum.toml` in `--data-dir`) again:
 

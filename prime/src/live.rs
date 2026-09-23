@@ -18,7 +18,8 @@ use std::time::{Duration, SystemTime};
 
 /// The settings a reload applies, by their names in the file. Every other setting applies at
 /// a restart.
-pub const LIVE_SETTINGS: &[&str] = &["fee", "hash-limit", "ban-secs", "ban-escalation"];
+pub const LIVE_SETTINGS: &[&str] =
+    &["fee", "finder-bps", "hash-limit", "ban-secs", "ban-escalation"];
 
 /// How often the settings file is looked at for a change.
 const WATCH_INTERVAL: Duration = Duration::from_secs(2);
@@ -37,21 +38,27 @@ pub struct State {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Live {
     pub fees: Vec<FeeOutput>,
+    pub finder_bps: u16,
     pub rules: Rules,
 }
 
 impl Live {
     /// The live settings `o` names, decoded for `chain` as at startup.
     pub fn from_options(o: &Options, chain: Option<ratum::rpc::Chain>) -> Result<Self, String> {
-        Ok(Self { fees: settings::fees(o, chain)?, rules: settings::limiter_rules(o)? })
+        Ok(Self {
+            fees: settings::fees(o, chain)?,
+            finder_bps: settings::finder_bps(o)?,
+            rules: settings::limiter_rules(o)?,
+        })
     }
 
     /// The live settings the pool holds now.
     pub fn current(server: &Server) -> Self {
-        Self {
-            fees: lock(&server.ledger).split_policy().fees.clone(),
-            rules: lock(&server.limiter).rules().clone(),
-        }
+        let (fees, finder_bps) = {
+            let l = lock(&server.ledger);
+            (l.split_policy().fees.clone(), l.split_policy().finder_bps)
+        };
+        Self { fees, finder_bps, rules: lock(&server.limiter).rules().clone() }
     }
 
     /// Installs these settings where each is read from; the lines describing what changed,
@@ -67,6 +74,14 @@ impl Live {
             ));
             lock(&server.ledger).set_fees(self.fees);
         }
+        if current.finder_bps != self.finder_bps {
+            changes.push(format!(
+                "finder-bps: {} (was {})",
+                finder_text(self.finder_bps),
+                finder_text(current.finder_bps)
+            ));
+            lock(&server.ledger).set_finder_bps(self.finder_bps);
+        }
         if current.rules != self.rules {
             changes.push(format!(
                 "hashrate limiter: {} (was {})",
@@ -80,8 +95,17 @@ impl Live {
 
     /// The settings, one line each, as `--show-settings` prints them.
     pub fn describe(&self) -> String {
-        format!("fee: {}\n{}", fees_text(&self.fees), self.rules.describe())
+        format!(
+            "fee: {}\nfinder-bps: {}\n{}",
+            fees_text(&self.fees),
+            finder_text(self.finder_bps),
+            self.rules.describe()
+        )
     }
+}
+
+fn finder_text(bps: u16) -> String {
+    format!("{bps} ({}%)", f64::from(bps) / 100.0)
 }
 
 /// A multi-line description on one line.
@@ -316,6 +340,8 @@ mod tests {
     fn server_on_file(text: &str) -> (Server, std::path::PathBuf) {
         let path = scratch_file(text);
         let mut server = server_with(&[(ALICE, 1)]);
+        // The default finder's cut, as `main` sets it: a file naming none changes nothing.
+        lock(&server.ledger).set_finder_bps(8_000);
         server.settings.config_path = Some(path.clone());
         server.settings.file_options = toml::from_str(text).unwrap();
         (server, path)
@@ -334,9 +360,14 @@ mod tests {
         assert!(text.contains("fee: ") && text.contains("25 bps (0.25%)"), "{text}");
         assert!(text.contains("only at a restart: min-diff"), "{text}");
 
-        std::fs::write(&path, "min-diff = 16384\n").unwrap();
+        std::fs::write(&path, "min-diff = 16384\nfinder-bps = 5000\n").unwrap();
         let text = reload(&server).unwrap();
         assert!(Live::current(&server).fees.is_empty(), "a fee removed from the file is removed");
+        assert!(text.contains("finder-bps: 5000 (50%) (was 8000 (80%))"), "{text}");
+        assert_eq!(Live::current(&server).finder_bps, 5_000);
+        std::fs::write(&path, "min-diff = 16384\n").unwrap();
+        let text = reload(&server).unwrap();
+        assert_eq!(Live::current(&server).finder_bps, 8_000, "removed: back to the default");
         assert!(!text.contains("restart"), "back to the startup value: {text}");
 
         let limits = "hash-limit = [\"1m=100T\", \"2h=3.5T\"]\nban-secs = 3600\n";
@@ -416,15 +447,21 @@ mod tests {
     #[test]
     fn the_settings_are_described_one_per_line() {
         let rules = Rules::default();
-        let live =
-            Live { fees: fee_outputs(&[(FEE_ADDRESS, 25), (ALICE, 100)]), rules: rules.clone() };
+        let live = Live {
+            fees: fee_outputs(&[(FEE_ADDRESS, 25), (ALICE, 100)]),
+            finder_bps: 8_000,
+            rules: rules.clone(),
+        };
         assert_eq!(
             live.describe(),
             format!(
                 "fee: {FEE_ADDRESS} 25 bps (0.25%), {ALICE} 100 bps (1%) (125 bps together)\n\
-                 hash-limit: none\n"
+                 finder-bps: 8000 (80%)\nhash-limit: none\n"
             )
         );
-        assert_eq!(Live { fees: Vec::new(), rules }.describe(), "fee: none\nhash-limit: none\n");
+        assert_eq!(
+            Live { fees: Vec::new(), finder_bps: 0, rules }.describe(),
+            "fee: none\nfinder-bps: 0 (0%)\nhash-limit: none\n"
+        );
     }
 }

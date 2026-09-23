@@ -23,6 +23,8 @@ const DEFAULT_MAX_CONNECTIONS_PER_IP: usize = 32;
 const DEFAULT_LISTEN: &str = "0.0.0.0:28915";
 const DEFAULT_MOTD: &str = "RATUM Prime";
 const DEFAULT_WINDOW_MULTIPLE: f64 = 8.0;
+/// The finder's cut by default: 80% of what the fees leave.
+const DEFAULT_FINDER_BPS: u16 = 8_000;
 /// The id written in every coinbase's scriptSig and every resume token; a gateway resumes only
 /// under a nonzero one.
 const PRIME_ID: u64 = 1;
@@ -104,7 +106,8 @@ pub fn resolve(o: &Options) -> Result<Resolved, String> {
     };
     // The fees need the chain's address prefixes, which the node reports after the options
     // resolve, so `fees` decodes them then and `Ledger::set_fees` installs them.
-    let split = SplitPolicy { fees: Vec::new(), public_gateway };
+    // The finder's cut is set beside them (`Ledger::set_finder_bps`).
+    let split = SplitPolicy { fees: Vec::new(), finder_bps: 0, public_gateway };
     Ok(Resolved { settings, window, split })
 }
 
@@ -149,6 +152,18 @@ pub fn fees(o: &Options, chain: Option<rpc::Chain>) -> Result<Vec<FeeOutput>, St
         ));
     }
     Ok(fees)
+}
+
+/// The finder's cut `--finder-bps` names, 0 to 10000. This is the one reading of the
+/// setting: startup and every reload use it.
+pub fn finder_bps(o: &Options) -> Result<u16, String> {
+    valid_or(
+        o.finder_bps,
+        DEFAULT_FINDER_BPS,
+        "--finder-bps",
+        "basis points from 0 to 10000",
+        |n| u64::from(*n) <= ratum::BASIS_POINTS_PER_UNIT,
+    )
 }
 
 /// The hashrate limiter's rules: `--hash-limit`, `--ban-secs` (a day by default) and
@@ -431,6 +446,11 @@ mod tests {
             "--public-gateway-fee-subsidy-bps",
         );
         refused(Options { poll: Some(0.0), ..Default::default() }, "--poll");
+        assert_eq!(finder_bps(&Options::default()), Ok(DEFAULT_FINDER_BPS));
+        assert_eq!(finder_bps(&Options { finder_bps: Some(0), ..Default::default() }), Ok(0));
+        let e =
+            finder_bps(&Options { finder_bps: Some(10_001), ..Default::default() }).unwrap_err();
+        assert!(e.contains("--finder-bps"), "{e}");
         refused(Options { max_connections: Some(0), ..Default::default() }, "--max-connections");
         refused(
             Options { ledger_keep_shares: Some(0), ..Default::default() },

@@ -17,6 +17,8 @@ use ratum::rpc;
 pub const ALICE: &str = "bcrt1q5xs6rgdp5xs6rgdp5xs6rgdp5xs6rgdpa854mc";
 /// A regtest address whose script is `ratum::fixtures::p2wpkh(0xb2)`.
 pub const BOB: &str = "bcrt1qk2et9v4jk2et9v4jk2et9v4jk2et9v4jldyv0a";
+/// A regtest address whose script is `ratum::fixtures::p2wpkh(0xd4)`.
+pub const CAROL: &str = "bcrt1q6n2df4x56n2df4x56n2df4x56n2df4x5jumwup";
 /// A regtest address whose script is `ratum::fixtures::p2wpkh(0xc3)`: where a test's operator
 /// fee goes.
 pub const FEE_ADDRESS: &str = "bcrt1qc0pu8s7rc0pu8s7rc0pu8s7rc0pu8s7rpz2hyw";
@@ -59,7 +61,7 @@ pub fn fee_outputs(fees: &[(&str, u16)]) -> Vec<FeeOutput> {
 /// An unbounded window holding `shares`, each an identity and its difficulty, under the
 /// operator `fees`.
 pub fn ledger_with(shares: &[(&str, u64)], fees: &[(&str, u16)]) -> Ledger {
-    let policy = SplitPolicy { fees: fee_outputs(fees), public_gateway: None };
+    let policy = SplitPolicy { fees: fee_outputs(fees), finder_bps: 0, public_gateway: None };
     let mut ledger = Ledger::new(WindowRule::fixed(u128::MAX), policy);
     for (i, (identity, difficulty)) in shares.iter().enumerate() {
         let mut hash = [0u8; 32];

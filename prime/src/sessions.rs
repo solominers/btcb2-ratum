@@ -133,6 +133,7 @@ mod tests {
                 payout: Payout { identity: "carol".into(), sats: split.value },
                 script_pubkey: split.script_pubkey.clone(),
             }],
+            Vec::new(),
             0,
         );
         let v3 = V3Session { token, abw };

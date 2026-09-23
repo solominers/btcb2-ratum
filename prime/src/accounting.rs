@@ -4,6 +4,7 @@
 
 use crate::ledger::Share;
 use crate::ledger::blocks::{FoundBlock, OwedBlock};
+use crate::ledger::carry::CarryDelta;
 use crate::ledger::split::Payout;
 use crate::payout::dictated_outputs;
 use crate::server::Server;
@@ -15,7 +16,7 @@ use ratum::username::identity_of;
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::net::SocketAddr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// How far back the pool's clock may step without a hash being forgotten while a resend of its
 /// share could still be accepted.
@@ -179,20 +180,40 @@ pub fn credit_share(
     Ok(())
 }
 
-/// Records the block to the ledger's history and, when its coinbase left dictated outputs
-/// out or paid the window nothing, what the pool's payout script owes for it.
+/// Records the block to the ledger's history, applies the carry its split moved, and, when
+/// its coinbase left dictated outputs out or paid the window nothing, what the pool's payout
+/// script owes for it. `finder` is the identity of the connection the block came on and
+/// `carry` the deltas of the split its job used.
 pub fn record_block(
     server: &Server,
     peer: SocketAddr,
     username: &str,
     rebuilt: &RebuiltShare,
     now: u64,
+    finder: Option<&str>,
+    carry: Option<Arc<[CarryDelta]>>,
 ) {
     record_found_block(server, peer, username, rebuilt, now);
+    if let Some(deltas) = carry.filter(|d| !d.is_empty()) {
+        match lock(&server.ledger).apply_carry(&rebuilt.block_hash, &deltas, now) {
+            Ok(()) => info!(
+                "[{peer}]      carry: {} identit{} left out of or paid from the split \
+                 carried",
+                deltas.len(),
+                identity_suffix(deltas.len())
+            ),
+            Err(e) => error!(
+                "[{peer}]   !! could not write the carry the block's split moved ({e}); \
+                 {} identit{} keep their previous carry",
+                deltas.len(),
+                identity_suffix(deltas.len())
+            ),
+        }
+    }
     if !rebuilt.unpaid_outputs.is_empty() {
         record_unpaid_outputs(server, peer, rebuilt, now);
     } else if rebuilt.paid_to_split == 0 {
-        record_owed_block(server, peer, rebuilt, now);
+        record_owed_block(server, peer, rebuilt, now, finder);
     }
 }
 
@@ -268,9 +289,15 @@ fn owed_block(rebuilt: &RebuiltShare, found_at: u64, entries: Vec<Payout>) -> Op
 
 /// A coinbase that paid the window nothing owes the split a coinbaser response would dictate
 /// for what the pool's payout script received (`Ledger::weights_for` deducts the operator fee).
-fn record_owed_block(server: &Server, peer: SocketAddr, rebuilt: &RebuiltShare, now: u64) {
+fn record_owed_block(
+    server: &Server,
+    peer: SocketAddr,
+    rebuilt: &RebuiltShare,
+    now: u64,
+    finder: Option<&str>,
+) {
     let value = rebuilt.paid_to_pool;
-    let entries = dictated_outputs(server, value).into_iter().map(|d| d.payout).collect();
+    let entries = dictated_outputs(server, value, finder).into_iter().map(|d| d.payout).collect();
     let Some(owed) = owed_block(rebuilt, now, entries) else {
         warn!(
             "[{peer}]   ** the block's {value} sats went to the pool's payout script and \
@@ -365,7 +392,7 @@ mod tests {
     #[test]
     fn a_block_paying_the_split_is_recorded_and_owes_nothing() {
         let server = server();
-        record_block(&server, PEER, "carol.rig", &block(900, 100, Vec::new()), 42);
+        record_block(&server, PEER, "carol.rig", &block(900, 100, Vec::new()), 42, None, None);
         let records = lock(&server.records);
         let found = &records.blocks()[0];
         assert_eq!((found.finder.as_str(), found.tag_secondary.as_str()), ("carol", "garage"));
@@ -377,12 +404,12 @@ mod tests {
     fn a_found_block_records_the_difficulty_the_window_is_sized_to_not_the_tips() {
         let server = server();
         lock(&server.ledger).set_network_difficulty(123.5);
-        record_block(&server, PEER, "alice", &block(900, 100, Vec::new()), 42);
+        record_block(&server, PEER, "alice", &block(900, 100, Vec::new()), 42, None, None);
         let recorded = lock(&server.records).blocks()[0].network_difficulty;
         assert_eq!(recorded, 123.5, "the block being mined, from the template's bits");
 
         let never_sized = server_with(&[(ALICE, 1)]);
-        record_block(&never_sized, PEER, "alice", &block(900, 100, Vec::new()), 42);
+        record_block(&never_sized, PEER, "alice", &block(900, 100, Vec::new()), 42, None, None);
         assert_eq!(
             lock(&never_sized.records).blocks()[0].network_difficulty,
             0.0,
@@ -401,7 +428,7 @@ mod tests {
             lock(&server.ledger).identities().into_iter().map(|(id, _)| id).collect();
         assert_eq!(identities, [ALICE], "one identity, checked once against the minimum");
         assert_eq!(lock(&server.ledger).total_work(), 2);
-        record_block(&server, PEER, &upper, &rebuilt(3), 44);
+        record_block(&server, PEER, &upper, &rebuilt(3), 44, None, None);
         assert_eq!(lock(&server.records).blocks()[0].finder, ALICE);
     }
 
@@ -409,7 +436,7 @@ mod tests {
     fn a_block_leaving_dictated_outputs_out_owes_them() {
         let server = server();
         let left_out = vec![payout("carol", 60), payout("dave", 20)];
-        record_block(&server, PEER, "alice", &block(900, 100, left_out.clone()), 42);
+        record_block(&server, PEER, "alice", &block(900, 100, left_out.clone()), 42, None, None);
         assert_eq!(lock(&server.records).blocks().len(), 1);
         assert_eq!(owed_entries(&server), [left_out], "not the window's split");
     }
@@ -417,7 +444,7 @@ mod tests {
     #[test]
     fn a_block_paying_the_window_nothing_owes_the_window_split() {
         let server = server();
-        record_block(&server, PEER, "alice", &block(0, 1_000_000, Vec::new()), 42);
+        record_block(&server, PEER, "alice", &block(0, 1_000_000, Vec::new()), 42, None, None);
         assert_eq!(lock(&server.records).blocks().len(), 1);
         assert_eq!(owed_entries(&server), [vec![payout(ALICE, 750_000), payout(BOB, 250_000)]]);
     }
@@ -430,7 +457,7 @@ mod tests {
     fn left_out_outputs_the_pool_script_received_are_owed_as_dictated() {
         let server = server_charging_a_fee();
         let left_out = vec![payout("alice", 50), payout("bob", 30)];
-        record_block(&server, PEER, "alice", &block(900, 100, left_out.clone()), 42);
+        record_block(&server, PEER, "alice", &block(900, 100, left_out.clone()), 42, None, None);
         let records = lock(&server.records);
         let owed = &records.owed()[0];
         assert_eq!((owed.height, owed.block_hash, owed.found_at), (961_866, [0xbb; 32], 42));
@@ -442,7 +469,7 @@ mod tests {
     fn left_out_outputs_over_what_the_pool_script_received_are_scaled_down() {
         let server = server_charging_a_fee();
         let left_out = vec![payout("alice", 60), payout("bob", 20)];
-        record_block(&server, PEER, "alice", &block(950, 50, left_out), 42);
+        record_block(&server, PEER, "alice", &block(950, 50, left_out), 42, None, None);
         assert_eq!(
             owed_entries(&server),
             [vec![payout("alice", 37), payout("bob", 12)]],
@@ -454,7 +481,7 @@ mod tests {
     fn a_left_out_fee_output_is_owed_to_the_fee_address() {
         let server = server_charging_a_fee();
         let left_out = vec![payout(FEE_ADDRESS, 10), payout("alice", 60)];
-        record_block(&server, PEER, "alice", &block(930, 70, left_out.clone()), 42);
+        record_block(&server, PEER, "alice", &block(930, 70, left_out.clone()), 42, None, None);
         assert_eq!(owed_entries(&server), [left_out], "the fee is owed like any output");
     }
 
@@ -462,7 +489,7 @@ mod tests {
     fn nothing_is_owed_when_the_pool_script_received_nothing() {
         let server = server_charging_a_fee();
         let left_out = vec![payout("alice", 60), payout("bob", 20)];
-        record_block(&server, PEER, "alice", &block(1000, 0, left_out), 42);
+        record_block(&server, PEER, "alice", &block(1000, 0, left_out), 42, None, None);
         assert_eq!(lock(&server.records).blocks().len(), 1);
         assert!(owed_entries(&server).is_empty(), "every amount scales to zero");
     }
@@ -470,7 +497,7 @@ mod tests {
     #[test]
     fn a_block_paying_the_window_nothing_owes_the_fee_and_the_split() {
         let server = server_charging_a_fee();
-        record_block(&server, PEER, "alice", &block(0, 1_000_000, Vec::new()), 42);
+        record_block(&server, PEER, "alice", &block(0, 1_000_000, Vec::new()), 42, None, None);
         assert_eq!(
             owed_entries(&server),
             [vec![payout(FEE_ADDRESS, 10_000), payout(ALICE, 742_500), payout(BOB, 247_500)]],
@@ -481,7 +508,7 @@ mod tests {
     #[test]
     fn a_block_paying_an_empty_window_nothing_owes_nothing() {
         let server = server_with(&[]);
-        record_block(&server, PEER, "alice", &block(0, 1_000_000, Vec::new()), 42);
+        record_block(&server, PEER, "alice", &block(0, 1_000_000, Vec::new()), 42, None, None);
         assert_eq!(lock(&server.records).blocks().len(), 1);
         assert!(owed_entries(&server).is_empty());
     }
@@ -489,7 +516,7 @@ mod tests {
     #[test]
     fn the_owed_split_charges_the_public_gateway_fee_and_reassigns_it() {
         let server = server_with_public_gateway_fee(5_000, 10_000);
-        record_block(&server, PEER, "alice", &block(0, 200_000, Vec::new()), 42);
+        record_block(&server, PEER, "alice", &block(0, 200_000, Vec::new()), 42, None, None);
         assert_eq!(owed_entries(&server), [vec![payout(BOB, 150_000), payout(ALICE, 50_000)]]);
     }
 

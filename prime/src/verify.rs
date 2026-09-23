@@ -8,6 +8,7 @@ mod rebuild;
 mod tests;
 
 use crate::abw::{AbwSlotState, SlotKeyStatus};
+use crate::ledger::carry::CarryDelta;
 use crate::ledger::split::Payout;
 use crate::payout::DictatedOutput;
 use ratum::datum::messages;
@@ -123,6 +124,8 @@ impl RebuiltShare {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DictatedSplit {
     pub outputs: Arc<[DictatedOutput]>,
+    /// The carry the split moves, applied when a block is found on it.
+    pub carry: Arc<[CarryDelta]>,
     pub value: u64,
     pub prev_hash: [u8; 32],
     pub sent_at: u64,
@@ -154,14 +157,18 @@ impl DictatedSplits {
         value: u64,
         prev_hash: [u8; 32],
         outputs: Vec<DictatedOutput>,
+        carry: Vec<CarryDelta>,
         sent_at: u64,
     ) {
-        let outputs: Arc<[DictatedOutput]> = match self.by_id.get(&self.last_id) {
-            Some(last) if *last.outputs == *outputs => Arc::clone(&last.outputs),
-            _ => outputs.into(),
-        };
+        let (outputs, carry): (Arc<[DictatedOutput]>, Arc<[CarryDelta]>) =
+            match self.by_id.get(&self.last_id) {
+                Some(last) if *last.outputs == *outputs && *last.carry == *carry => {
+                    (Arc::clone(&last.outputs), Arc::clone(&last.carry))
+                }
+                _ => (outputs.into(), carry.into()),
+            };
         self.order.retain(|held| *held != id);
-        self.by_id.insert(id, DictatedSplit { outputs, value, prev_hash, sent_at });
+        self.by_id.insert(id, DictatedSplit { outputs, carry, value, prev_hash, sent_at });
         self.order.push_back(id);
         self.last_id = id;
         self.keep_newest(MAX_SPLITS);
@@ -330,9 +337,15 @@ impl<'a> Verifier<'a> {
         value: u64,
         prev_hash: [u8; 32],
         outputs: Vec<DictatedOutput>,
+        carry: Vec<CarryDelta>,
         now: u64,
     ) {
-        self.splits.record(coinbaser_id, value, prev_hash, outputs, now);
+        self.splits.record(coinbaser_id, value, prev_hash, outputs, carry, now);
+    }
+
+    /// The carry the split `coinbaser_id` moves, for the block found on it.
+    pub fn dictated_carry(&self, coinbaser_id: u8) -> Option<Arc<[CarryDelta]>> {
+        self.splits.get(coinbaser_id).map(|s| Arc::clone(&s.carry))
     }
 
     /// The splits to save with a session: the newest `SAVED_SPLITS` of those dictated on the

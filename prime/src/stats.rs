@@ -274,6 +274,7 @@ fn miners_json(server: &Server, l: &LedgerView) -> Vec<Value> {
                 "tag": m.state.tag_secondary,
                 "own_gateway_work": m.state.own_gateway_work.to_string(),
                 "banned_until": banned_until.get(&m.identity),
+                "carry_work": m.carry.to_string(),
             })
         })
         .collect()
@@ -312,6 +313,7 @@ struct MinerRow {
     state: IdentityState,
     payout_sats: u64,
     recent_work: u128,
+    carry: u128,
 }
 
 struct LedgerView {
@@ -332,6 +334,8 @@ struct LedgerView {
     luck: Luck,
     confirmations: HashMap<[u8; 32], ConfirmationReading>,
     recent_work: u128,
+    carry_work: u128,
+    carry_identities: usize,
     window_multiple: f64,
     split_policy: SplitPolicy,
     public_gateway_fee_work: Option<PublicGatewayFeeWork>,
@@ -354,8 +358,10 @@ impl LedgerView {
         };
         let l = lock(&server.ledger);
         let mut recent = l.work_since_by_identity(hashrate_cutoff());
-        let (weights, miners_value) = l.weights_for(coinbase_value.unwrap_or(0));
+        let (weights, window_value) = l.weights_for(coinbase_value.unwrap_or(0));
         let identities = l.identities();
+        let mut carries: HashMap<String, u128> =
+            identities.iter().map(|(id, _)| (id.clone(), l.carry().get(id))).collect();
         let mut view = Self {
             total_work: l.total_work(),
             target_work: l.window(),
@@ -372,16 +378,19 @@ impl LedgerView {
             luck,
             confirmations,
             recent_work: recent.values().sum(),
+            carry_work: l.carry().total(),
+            carry_identities: l.carry().len(),
         };
         drop(l);
         // The split's sort and amounts run off the ledger lock.
         let mut payout_sats: HashMap<Arc<str>, u64> =
-            weights.split(miners_value).into_iter().map(|p| (p.identity, p.sats)).collect();
+            weights.split(window_value).payouts.into_iter().map(|p| (p.identity, p.sats)).collect();
         view.miners = identities
             .into_iter()
             .map(|(identity, state)| MinerRow {
                 payout_sats: payout_sats.remove(identity.as_str()).unwrap_or(0),
                 recent_work: recent.remove(&identity).unwrap_or(0),
+                carry: carries.remove(&identity).unwrap_or(0),
                 identity,
                 state,
             })
@@ -450,6 +459,7 @@ pub(crate) fn snapshot(server: &Server, history: &Mutex<HashrateHistory>) -> Val
             "prime_id": server.share_policy.config.prime_id,
             "payout_script": hex::encode(&server.share_policy.config.payout_script),
             "fee_bps": l.split_policy.fee_bps(),
+            "finder_bps": l.split_policy.finder_bps,
             "fees": l.split_policy.fees.iter().map(|f| json!({"address": f.address, "bps": f.bps})).collect::<Vec<_>>(),
             "public_gateway_fee_bps": public_gateway_fee.map_or(0, |f| f.fee_bps),
             "public_gateway_fee_subsidy_bps": public_gateway_fee.map_or(0, |f| f.subsidy_bps),
@@ -479,6 +489,8 @@ pub(crate) fn snapshot(server: &Server, history: &Mutex<HashrateHistory>) -> Val
             "max_shares": l.max_shares,
             "count_capped": l.count_capped,
             "operator_fee_sats": operator_fee,
+            "carry_work": l.carry_work.to_string(),
+            "carry_identities": l.carry_identities,
             "miners": miners,
         },
         "public_gateway_fee": public_gateway_fee_detail,

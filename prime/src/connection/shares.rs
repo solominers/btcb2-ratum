@@ -18,7 +18,7 @@ use crate::verify::{
     self, BlockCheck, JobTxns, NTIME_WINDOW_SECS, RebuiltShare, Refusal, VERSION_ROLLING_MASK,
     Verifier,
 };
-use log::{debug, error, warn};
+use log::{debug, error, info, warn};
 use ratum::datum::messages;
 use ratum::datum::messages::abw::CandidateRef;
 use ratum::datum::messages::share::PowSubmit;
@@ -580,6 +580,13 @@ impl Connection<'_> {
             );
             return ShareVerdict::Rejected(RejectReason::Other);
         }
+        if self.identity.is_none() {
+            info!(
+                "[{peer}]      {identity} is this connection's identity: the finder's cut of \
+                 every split dictated to it from now on"
+            );
+            self.identity = Some(identity.to_string());
+        }
         let ntime = u64::from(s.block_time());
         let banned = lock(&self.server.limiter).observe(&identity, ntime, rebuilt.difficulty, now);
         if let Some(ban) = banned {
@@ -653,13 +660,29 @@ impl Connection<'_> {
             ),
             Relayed::Accepted => {
                 self.note_published_slot(s);
-                accounting::record_block(self.server, self.peer, &s.username, rebuilt, now);
+                accounting::record_block(
+                    self.server,
+                    self.peer,
+                    &s.username,
+                    rebuilt,
+                    now,
+                    self.identity.as_deref(),
+                    self.verifier.dictated_carry(rebuilt.coinbaser_id),
+                );
             }
             Relayed::Unknown => {
                 // The node did not answer: a resend submits the block again (`job_verdict`).
                 self.note_published_slot(s);
                 ratum::lock(&self.server.relayed_blocks).remove(&rebuilt.block_hash);
-                accounting::record_block(self.server, self.peer, &s.username, rebuilt, now);
+                accounting::record_block(
+                    self.server,
+                    self.peer,
+                    &s.username,
+                    rebuilt,
+                    now,
+                    self.identity.as_deref(),
+                    self.verifier.dictated_carry(rebuilt.coinbaser_id),
+                );
             }
         }
     }

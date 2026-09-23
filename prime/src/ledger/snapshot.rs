@@ -2,8 +2,10 @@
 //! of every table, copied into a new file that is verified to open and then renamed into place.
 
 use super::blocks::{BLOCKS, CHAIN_STATE, OWED};
+use super::carry::{CARRY, CARRY_DELTAS};
 use super::db::{DbResult as _, create_in_file, open_database, write};
 use super::store::{META, RETIRED_BY_HASH, SHARES};
+use crate::limiter::BANS;
 use redb::{
     Database, Key, MultimapTableHandle as _, ReadTransaction, ReadableDatabase, ReadableTable,
     ReadableTableMetadata, TableDefinition, TableHandle as _, Value, WriteTransaction,
@@ -20,6 +22,9 @@ pub struct SnapshotCounts {
     pub blocks: u64,
     pub owed: u64,
     pub readings: u64,
+    pub carry: u64,
+    pub carry_deltas: u64,
+    pub bans: u64,
 }
 
 impl SnapshotCounts {
@@ -31,6 +36,9 @@ impl SnapshotCounts {
             n if n == BLOCKS.name() => &mut self.blocks,
             n if n == OWED.name() => &mut self.owed,
             n if n == CHAIN_STATE.name() => &mut self.readings,
+            n if n == CARRY.name() => &mut self.carry,
+            n if n == CARRY_DELTAS.name() => &mut self.carry_deltas,
+            n if n == BANS.name() => &mut self.bans,
             _ => return None,
         })
     }
@@ -40,8 +48,15 @@ impl fmt::Display for SnapshotCounts {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{} shares, {} blocks, {} owed records, {} confirmation readings",
-            self.shares, self.blocks, self.owed, self.readings
+            "{} shares, {} blocks, {} owed records, {} confirmation readings, {} carries \
+             over {} blocks, {} bans",
+            self.shares,
+            self.blocks,
+            self.owed,
+            self.readings,
+            self.carry,
+            self.carry_deltas,
+            self.bans
         )
     }
 }
@@ -146,6 +161,9 @@ fn copy_into(db: &Database, ledger: &Path, file: std::fs::File) -> io::Result<Sn
                 n if n == BLOCKS.name() => copy_table(&r, w, BLOCKS)?,
                 n if n == OWED.name() => copy_table(&r, w, OWED)?,
                 n if n == CHAIN_STATE.name() => copy_table(&r, w, CHAIN_STATE)?,
+                n if n == CARRY.name() => copy_table(&r, w, CARRY)?,
+                n if n == CARRY_DELTAS.name() => copy_table(&r, w, CARRY_DELTAS)?,
+                n if n == BANS.name() => copy_table(&r, w, BANS)?,
                 // Deleted by `Store::open`; held by a ledger no pool has opened since.
                 n if n == RETIRED_BY_HASH.name() => continue,
                 other => return Err(unknown_table(ledger, other)),
@@ -221,7 +239,14 @@ mod tests {
         let counts = write_snapshot(&db, &live, &target).unwrap();
         assert_eq!(
             counts,
-            SnapshotCounts { shares: 5, meta: 2, blocks: 1, owed: 1, readings: 1 },
+            SnapshotCounts {
+                shares: 5,
+                meta: 2,
+                blocks: 1,
+                owed: 1,
+                readings: 1,
+                ..Default::default()
+            },
             "the chain stamp and the cumulative work are the meta rows"
         );
         assert!(!temporary_name(&target).exists(), "the temporary file was renamed away");
@@ -246,7 +271,8 @@ mod tests {
         assert_eq!(dumped, 5, "the share recorded after the snapshot is not in it");
         assert_eq!(
             counts.to_string(),
-            "5 shares, 1 blocks, 1 owed records, 1 confirmation readings"
+            "5 shares, 1 blocks, 1 owed records, 1 confirmation readings, 0 carries over 0 \
+             blocks, 0 bans"
         );
     }
 

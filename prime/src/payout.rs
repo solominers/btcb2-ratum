@@ -1,7 +1,8 @@
 //! The split as outputs: each identity's address decoded to the script that pays it, the ones no
 //! address decodes left with the pool, and the coinbaser response carrying the rest.
 
-use crate::ledger::split::{Payout, SplitPolicy, Weights};
+use crate::ledger::carry::CarryDelta;
+use crate::ledger::split::{Payout, Split, SplitPolicy, Weights};
 use crate::server::Server;
 use log::{info, warn};
 use ratum::bitcoin::address;
@@ -59,17 +60,73 @@ pub fn unpayable_reason(chain: Option<rpc::Chain>) -> String {
     }
 }
 
-/// The outputs dictated for `value`: the operator fee outputs first, then the split of the
-/// rest (`Weights::split`). The ledger lock is held only to copy the fees and the window's
-/// weights (`Ledger::weights_for`): the sort, the amounts and the address decoding run
-/// without it.
-pub fn dictated_outputs(server: &Server, value: u64) -> Vec<DictatedOutput> {
-    let (fees, weights, miners_value) = {
-        let l = lock(&server.ledger);
-        let (weights, miners_value) = l.weights_for(value);
-        (fee_outputs(l.split_policy(), value), weights, miners_value)
-    };
-    with_fees(fees, weights, miners_value, server.share_policy.chain)
+/// What a split is dictated from, copied under the ledger lock: the fee outputs, the
+/// finder's cut, the window's weights and the value they divide.
+struct Plan {
+    fees: Vec<DictatedOutput>,
+    finder: Option<(Arc<str>, Vec<u8>, u64)>,
+    weights: Weights,
+    window_value: u64,
+    window_shares: usize,
+    window_work: u128,
+}
+
+/// The plan for `value` on a connection whose identity is `finder`: the fees off the top,
+/// then the finder's cut of the rest when the finder is an address the pool can pay, then
+/// the window's share.
+fn plan(server: &Server, value: u64, finder: Option<&str>) -> Plan {
+    let chain = server.share_policy.chain;
+    let finder = finder.and_then(|f| address_script(f, chain).map(|script| (f, script)));
+    let l = lock(&server.ledger);
+    let policy = l.split_policy();
+    let fees = fee_outputs(policy, value);
+    let after_fees = policy.miners_share(value);
+    let finder = finder.and_then(|(identity, script)| {
+        let sats = policy.finder_cut(after_fees);
+        (sats != 0).then(|| (Arc::from(identity), script, sats))
+    });
+    let window_value = after_fees - finder.as_ref().map_or(0, |f| f.2);
+    Plan {
+        fees,
+        finder,
+        weights: l.weights(),
+        window_value,
+        window_shares: l.len(),
+        window_work: l.total_work(),
+    }
+}
+
+/// The plan's outputs and carry deltas: the fees, the finder's cut (merged into the finder's
+/// window payout when it has one), and the window's split among the output slots left.
+fn outputs_of(plan: Plan, chain: Option<rpc::Chain>) -> (Vec<DictatedOutput>, Vec<CarryDelta>) {
+    let Plan { mut fees, finder, weights, window_value, .. } = plan;
+    let reserved = fees.len() + usize::from(finder.is_some());
+    let room = MAX_COINBASER_OUTPUTS.saturating_sub(reserved);
+    let Split { mut payouts, carry_deltas } = weights.split_at_most(window_value, room);
+    if let Some((identity, script_pubkey, sats)) = finder {
+        match payouts.iter_mut().find(|p| p.identity == identity) {
+            Some(p) => p.sats += sats,
+            None => fees.push(DictatedOutput { payout: Payout { identity, sats }, script_pubkey }),
+        }
+    }
+    fees.extend(outputs_for(payouts, chain));
+    (fees, carry_deltas)
+}
+
+/// The outputs dictated for `value` to a connection of identity `finder`, and the carry
+/// deltas they move. The ledger lock is held only to copy the plan: the sort, the amounts
+/// and the address decoding run without it.
+pub fn dictated(
+    server: &Server,
+    value: u64,
+    finder: Option<&str>,
+) -> (Vec<DictatedOutput>, Vec<CarryDelta>) {
+    outputs_of(plan(server, value, finder), server.share_policy.chain)
+}
+
+/// `dictated` without the carry.
+pub fn dictated_outputs(server: &Server, value: u64, finder: Option<&str>) -> Vec<DictatedOutput> {
+    dictated(server, value, finder).0
 }
 
 /// The fee outputs of `policy` on `value`, each `FeeOutput::bps` of it; a fee that rounds to
@@ -83,18 +140,6 @@ fn fee_outputs(policy: &SplitPolicy, value: u64) -> Vec<DictatedOutput> {
             script_pubkey: fee.script_pubkey.clone(),
         })
         .collect()
-}
-
-/// `fees` followed by the split of `miners_value` among the output slots the fees leave.
-fn with_fees(
-    mut fees: Vec<DictatedOutput>,
-    weights: Weights,
-    miners_value: u64,
-    chain: Option<rpc::Chain>,
-) -> Vec<DictatedOutput> {
-    let room = MAX_COINBASER_OUTPUTS.saturating_sub(fees.len());
-    fees.extend(outputs_for(weights.split_at_most(miners_value, room), chain));
-    fees
 }
 
 /// The split as outputs to the identities `address_script` gives a script for; the others are
@@ -132,39 +177,44 @@ pub fn value_is_plausible(server: &Server, peer: SocketAddr, value: u64) -> bool
     false
 }
 
-/// The outputs dictated for `value` and the coinbaser response carrying them.
+/// The outputs dictated for `value` to a connection of identity `finder`, the carry they
+/// move, and the coinbaser response carrying them.
 pub fn dictate(
     server: &Server,
     peer: SocketAddr,
     value: u64,
     coinbaser_id: u8,
-) -> (Vec<DictatedOutput>, Vec<u8>) {
-    let (fees, weights, miners_value, window_shares, window_work) = {
-        let l = lock(&server.ledger);
-        let (weights, miners_value) = l.weights_for(value);
-        (fee_outputs(l.split_policy(), value), weights, miners_value, l.len(), l.total_work())
+    finder: Option<&str>,
+) -> (Vec<DictatedOutput>, Vec<CarryDelta>, Vec<u8>) {
+    let plan = plan(server, value, finder);
+    let (fee_outputs, window_shares, window_work) =
+        (plan.fees.len(), plan.window_shares, plan.window_work);
+    let fee_sats: u64 = plan.fees.iter().map(|d| d.payout.sats).sum();
+    let finder_text = match &plan.finder {
+        Some((identity, _, sats)) => format!("{sats} sats to the finder {identity}, "),
+        None => String::new(),
     };
-    let fee_outputs = fees.len();
-    let fee_sats: u64 = fees.iter().map(|d| d.payout.sats).sum();
-    let dictated = with_fees(fees, weights, miners_value, server.share_policy.chain);
-    let paid: u64 = dictated.iter().map(|d| d.payout.sats).sum::<u64>() - fee_sats;
+    let (dictated, carry) = outputs_of(plan, server.share_policy.chain);
+    let total: u64 = dictated.iter().map(|d| d.payout.sats).sum();
     info!(
-        "[{peer}]      paying {} miners {paid} of {value} sats from a window of {window_shares} \
-         shares ({window_work} work), {fee_sats} sats to {fee_outputs} fee output(s)",
+        "[{peer}]      paying {total} of {value} sats: {fee_sats} sats to {fee_outputs} fee \
+         output(s), {finder_text}the rest over a window of {window_shares} shares \
+         ({window_work} work) in {} output(s); {} carry delta(s)",
         dictated.len() - fee_outputs,
+        carry.len()
     );
     let outputs = dictated.iter().map(DictatedOutput::output).collect();
     let payload = CoinbaserResponse { value, coinbaser_id, outputs }
         .encode()
         .expect("a split of payable outputs totalling at most the value encodes");
-    (dictated, payload)
+    (dictated, carry, payload)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::fixtures::{
-        ALICE, BOB, FEE_ADDRESS, POOL, regtest_p2wpkh_address, server_with, server_with_fee,
+        ALICE, BOB, CAROL, FEE_ADDRESS, POOL, regtest_p2wpkh_address, server_with, server_with_fee,
         server_with_fees, server_with_public_gateway_fee,
     };
     use crate::ledger::split::FeeOutput;
@@ -173,7 +223,87 @@ mod tests {
     const MAIN_ADDRESS: &str = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
 
     fn coinbaser_outputs(server: &Server, value: u64) -> Vec<TxOut> {
-        dictated_outputs(server, value).iter().map(DictatedOutput::output).collect()
+        dictated_outputs(server, value, None).iter().map(DictatedOutput::output).collect()
+    }
+
+    fn values(outputs: &[DictatedOutput]) -> Vec<(u64, Vec<u8>)> {
+        outputs.iter().map(|o| (o.payout.sats, o.script_pubkey.clone())).collect()
+    }
+
+    #[test]
+    fn the_finder_takes_its_cut_after_the_fees_and_the_window_divides_the_rest() {
+        let server = server_with_fee(&[(ALICE, 3), (BOB, 1)], 100);
+        lock(&server.ledger).set_finder_bps(8_000);
+        // The fee takes 10_000; the finder 80% of the 990_000 left; the window the rest.
+        let outputs = dictated_outputs(&server, 1_000_000, Some(CAROL));
+        assert_eq!(
+            values(&outputs),
+            vec![
+                (10_000, p2wpkh(0xc3)),
+                (792_000, p2wpkh(0xd4)),
+                (148_500, p2wpkh(0xa1)),
+                (49_500, p2wpkh(0xb2))
+            ]
+        );
+        assert_eq!(outputs.iter().map(|o| o.payout.sats).sum::<u64>(), 1_000_000);
+        let merged = dictated_outputs(&server, 1_000_000, Some(ALICE));
+        assert_eq!(
+            values(&merged),
+            vec![(10_000, p2wpkh(0xc3)), (792_000 + 148_500, p2wpkh(0xa1)), (49_500, p2wpkh(0xb2))],
+            "a finder in the window is paid once"
+        );
+        let unpayable = dictated_outputs(&server, 1_000_000, Some("nonsense"));
+        assert_eq!(
+            values(&unpayable)[1],
+            (742_500, p2wpkh(0xa1)),
+            "no cut without a payable finder"
+        );
+        assert_eq!(values(&dictated_outputs(&server, 1_000_000, None))[1].0, 742_500);
+        assert_eq!(
+            dictated_outputs(&server, 600, Some(CAROL)).len(),
+            1,
+            "a cut under the minimum: none"
+        );
+    }
+
+    #[test]
+    fn an_identity_left_out_carries_its_weight_into_the_next_split() {
+        let server = server_with(&[(ALICE, 999), (BOB, 1)]);
+        let (outputs, deltas) = dictated(&server, 500_000, None);
+        assert_eq!(outputs.len(), 1, "bob's 500 is under the minimum");
+        let bob: Arc<str> = Arc::from(BOB);
+        assert_eq!(deltas, [CarryDelta { identity: Arc::clone(&bob), work: 1 }]);
+        lock(&server.ledger).apply_carry(&[7; 32], &deltas, 1).unwrap();
+        assert_eq!(lock(&server.ledger).carry().get(BOB), 1);
+
+        let (outputs, deltas) = dictated(&server, 500_000, None);
+        assert_eq!(
+            values(&outputs),
+            vec![(499_000, p2wpkh(0xa1)), (1_000, p2wpkh(0xb2))],
+            "bob weighs 2 of 1001"
+        );
+        assert_eq!(
+            deltas,
+            [CarryDelta { identity: Arc::clone(&bob), work: -1 }],
+            "paid: the carry is spent"
+        );
+        lock(&server.ledger).apply_carry(&[8; 32], &deltas, 2).unwrap();
+        assert_eq!(lock(&server.ledger).carry().get(BOB), 0);
+
+        // An identity with a carry and no share in the window is still in the split.
+        let carol: Arc<str> = Arc::from(CAROL);
+        let owed = [CarryDelta { identity: Arc::clone(&carol), work: 1_000 }];
+        lock(&server.ledger).apply_carry(&[9; 32], &owed, 3).unwrap();
+        let (outputs, deltas) = dictated(&server, 500_000, None);
+        assert_eq!(
+            values(&outputs)[0],
+            (250_125, p2wpkh(0xd4)),
+            "carol weighs 1000 of the 1999 left once bob's 250 is under the minimum"
+        );
+        assert_eq!(
+            deltas,
+            [CarryDelta { identity: carol, work: -1_000 }, CarryDelta { identity: bob, work: 1 }]
+        );
     }
 
     #[test]

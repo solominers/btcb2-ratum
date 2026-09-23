@@ -3,6 +3,7 @@
 //! is divided by.
 
 pub mod blocks;
+pub mod carry;
 pub(crate) mod db;
 mod snapshot;
 pub mod split;
@@ -14,6 +15,7 @@ pub use snapshot::{snapshot_refusal, write_snapshot};
 
 use crate::accounting::{ACCEPTED_HASH_RETENTION_SECS, MAX_ACCEPTED_HASHES};
 use blocks::BlockRecords;
+use carry::{Carry, CarryDelta};
 use log::{info, warn};
 use ratum::rpc;
 use redb::Database;
@@ -184,6 +186,10 @@ impl Identities {
     fn len(&self) -> usize {
         self.by_name.len()
     }
+
+    fn contains(&self, name: &str) -> bool {
+        self.by_name.contains_key(name)
+    }
 }
 
 pub struct Ledger {
@@ -191,6 +197,8 @@ pub struct Ledger {
     identities: Identities,
     window_rule: WindowRule,
     split_policy: SplitPolicy,
+    /// What each identity left out of a split is owed by the others (`carry`).
+    carry: Carry,
     total_work: u128,
     window: u128,
     store: Option<Store>,
@@ -218,6 +226,7 @@ impl Ledger {
             window: window_rule.window_for(1.0),
             window_rule,
             split_policy,
+            carry: Carry::default(),
             total_work: 0,
             store: None,
             cumulative_work: 0,
@@ -231,6 +240,7 @@ impl Ledger {
     /// Reads the store's share window back into this empty ledger, which records every later
     /// share to the store.
     fn attach(&mut self, store: Store) -> io::Result<ReadBack> {
+        self.carry = Carry::open(store.database(), ratum::unix_now())?;
         let mut read_back = self.load(&store)?;
         read_back.stamped = store.stamped;
         self.cumulative_work = store.cumulative_work;
@@ -344,6 +354,34 @@ impl Ledger {
     /// against, so it stays.
     pub fn set_fees(&mut self, fees: Vec<split::FeeOutput>) {
         self.split_policy.fees = fees;
+    }
+
+    /// Sets the finder's cut, which the next dictated split carries.
+    pub fn set_finder_bps(&mut self, bps: u16) {
+        self.split_policy.finder_bps = bps;
+    }
+
+    pub fn carry(&self) -> &Carry {
+        &self.carry
+    }
+
+    /// Applies the carry deltas of the split the block at `hash` used (`Carry::apply`).
+    pub fn apply_carry(
+        &mut self,
+        hash: &[u8; 32],
+        deltas: &[CarryDelta],
+        now: u64,
+    ) -> io::Result<()> {
+        self.carry.apply(hash, deltas, now)
+    }
+
+    /// Returns the carry the block at `hash` moved (`Carry::reverse`).
+    pub fn reverse_carry(
+        &mut self,
+        hash: &[u8; 32],
+        now: u64,
+    ) -> io::Result<Option<Vec<CarryDelta>>> {
+        self.carry.reverse(hash, now)
     }
 
     fn is_own_gateway_share(&self, share: &Share) -> bool {
@@ -661,10 +699,12 @@ pub fn open_share_ledger(
         );
     }
     info!(
-        "share window from {}: {} shares, {} work",
+        "share window from {}: {} shares, {} work; {} identities carry {} work",
         path.display(),
         ledger.len(),
-        ledger.total_work()
+        ledger.total_work(),
+        ledger.carry().len(),
+        ledger.carry().total()
     );
     match keep {
         Some(n) => info!(

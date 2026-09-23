@@ -7,6 +7,7 @@
 use crate::cli::{Options, USAGE_EXIT};
 use crate::control;
 use crate::ledger::blocks::{BlockRecords, ConfirmationReading, OwedBlock, Voided};
+use crate::ledger::carry::{self, CarryDelta};
 use crate::ledger::split::Payout;
 use crate::ledger::{self, LedgerLocation, Share};
 use crate::live;
@@ -179,6 +180,10 @@ pub trait LedgerAccess {
     fn server(&mut self) -> Option<&Server> {
         None
     }
+
+    /// Returns the carry the block at `hash` moved (`Carry::reverse`): the deltas reversed,
+    /// or none when the block recorded none.
+    fn reverse_carry(&mut self, hash: &[u8; 32], now: u64) -> io::Result<Option<Vec<CarryDelta>>>;
 }
 
 /// The ledger file of a stopped pool: opened by each command, never created.
@@ -196,6 +201,11 @@ impl LedgerAccess for FileLedger<'_> {
     fn database(&mut self) -> io::Result<(Arc<Database>, PathBuf)> {
         let path = self.location.existing_file(self.flag)?;
         Ok((Arc::new(ledger::open_existing(&path)?), path))
+    }
+
+    fn reverse_carry(&mut self, hash: &[u8; 32], now: u64) -> io::Result<Option<Vec<CarryDelta>>> {
+        let (db, _) = self.database()?;
+        carry::reverse_in_file(&db, hash, now)
     }
 }
 
@@ -270,9 +280,25 @@ pub fn execute(
                 | Command::Unban { .. } => unreachable!("matched above"),
             })?;
             out.write_all(text.as_bytes())?;
-            result
+            result?;
+            if let Command::VoidBlock { arg } = command {
+                let hash = block_hash_arg("--void-block", arg, "")?;
+                if let Some(deltas) = access.reverse_carry(&hash, now)? {
+                    writeln!(
+                        out,
+                        "returned the carry its split moved: {} identit{}",
+                        deltas.len(),
+                        identity_suffix(deltas.len())
+                    )?;
+                }
+            }
+            Ok(())
         }
     }
+}
+
+fn identity_suffix(count: usize) -> &'static str {
+    if count == 1 { "y" } else { "ies" }
 }
 
 /// `--bans`: every ban holding at `now`, one per line, soonest to end first.

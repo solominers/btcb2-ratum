@@ -25,6 +25,7 @@ mod unix {
     use super::{ConnectError, SOCKET_NAME};
     use crate::admin::{self, Command, LedgerAccess};
     use crate::ledger::blocks::BlockRecords;
+    use crate::ledger::carry::CarryDelta;
     use crate::server::Server;
     use log::{error, info, warn};
     use ratum::lock;
@@ -256,6 +257,14 @@ mod unix {
 
         fn server(&mut self) -> Option<&Server> {
             Some(self.0)
+        }
+
+        fn reverse_carry(
+            &mut self,
+            hash: &[u8; 32],
+            now: u64,
+        ) -> io::Result<Option<Vec<CarryDelta>>> {
+            lock(&self.0.ledger).reverse_carry(hash, now)
         }
     }
 

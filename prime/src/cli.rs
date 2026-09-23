@@ -60,6 +60,9 @@ pub struct Options {
     #[arg(long, value_name = "ADDRESS=BPS", value_delimiter = ',')]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fee: Vec<String>,
+    /// The finder's cut of what the fees leave, in basis points (8000: 80%). Live.
+    #[arg(long)]
+    pub finder_bps: Option<u16>,
     /// Whether the pool re-reads the settings file when it changes (on by default).
     #[arg(long, num_args = 0..=1, default_missing_value = "true")]
     pub watch_config: Option<bool>,
