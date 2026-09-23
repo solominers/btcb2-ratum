@@ -301,6 +301,9 @@ min-diff = 16384                          # smallest share difficulty credited, 
 | `--ledger-keep-shares <n>` | keep all | the shares retained on disk (see "Ledger and window") |
 | `--fee <address>=<bps>,...` | none | the operator fees, each an output of the coinbase; live (see "Live settings") |
 | `--watch-config <bool>` | true | re-read the settings file when it changes (see "Live settings") |
+| `--hash-limit <period>=<rate>,...` | none | the hashrate brackets an identity may not exceed; live (see "Hashrate limiter") |
+| `--ban-secs <n>` | 86400 | how long a ban runs; live |
+| `--ban-escalation <factor>` | 1 | the factor each repeat ban is longer by; live |
 | `--public-gateway-tag <text>` | none | the public gateway's secondary coinbase tag |
 | `--public-gateway-fee-bps <n>` | 0 | the fee on public-gateway work, at most 10000 |
 | `--public-gateway-fee-subsidy-bps <n>` | 0 | the portion of that fee reassigned to own-gateway miners |
@@ -580,9 +583,42 @@ five minutes while running, so run the pool until the block's confirmations are 
 accepted the block, not that it stayed in the chain, and nothing else in the pool re-read
 that.
 
+### Hashrate limiter
+
+Each identity is one payout address, and the pool is built for small miners: one address may
+bring at most a bounded hashrate. `--hash-limit` names the brackets, each `<period>=<rate>`
+(`1m=100T`, `5m=50T`, `30m=10T`, `2h=3.5T`; a period in seconds, minutes or hours from 10 s to
+24 h, a rate in H/s with K, M, G, T or P), comma-separated on the command line and a list in
+the file (`hash-limit = ["1m=100T", "5m=50T", "30m=10T", "2h=3.5T"]`). At most 8 brackets;
+none is no limit. On every accepted share the identity's difficulty-weighted work over each
+bracket's period is read as a hashrate, and an identity over any bracket is banned.
+
+The brackets are read together: a small miner's share arrivals vary a lot over a minute (at
+the default share floor a 3.5 TH/s miner submits about three shares a minute, so its one-minute
+reading routinely shows double or triple its rate), so the short periods carry thresholds far
+above the cap and only catch a large miner, within about a minute, while the long period holds
+the cap. A reading is work over the whole period, not over the time the identity has been
+seen, so a miner that just started reads low until the period fills.
+
+A share is placed at its header time, no earlier than 300 seconds before it was accepted: a
+gateway that reconnects replays the shares it queued while away, which would read as a burst
+at their acceptance time, and a header time can be pushed back only that far, where the
+longer brackets have the measure. The shares an identity was credited before its ban stay in
+the window: they were under the limit when they were accepted.
+
+A ban refuses the identity's shares with reason `HashLimit` (code 45) until it ends, after
+`--ban-secs` (a day by default), times `--ban-escalation` to the power of the identity's earlier
+bans (1 by default: every ban the same length; 2 doubles it each time). A share that is a
+block is still relayed to the network before it is refused. Bans are written to the ledger
+file, so a restart keeps them and the count of an identity's bans; a memory-only pool holds
+them until it stops. The pool logs each ban at `warn`, `/stats.json` lists the brackets and
+the bans under `limiter` and each banned miner's `banned_until`, `--bans` prints them, and
+`--ban` and `--unban` set and end one by hand (all through the running pool).
+
 ### Live settings
 
-The settings named live in the table under "Configuration" (`fee`) apply while the pool runs;
+The settings named live in the table under "Configuration" (`fee`, `hash-limit`, `ban-secs`,
+`ban-escalation`) apply while the pool runs;
 every other setting applies at a restart. The pool reads them from its settings file
 (`--config`, or `ratum.toml` in `--data-dir`) again:
 
@@ -626,6 +662,9 @@ naming a file that sets it):
 | `--reload` | re-reads the settings file and applies the live settings (see "Live settings") |
 | `--set <setting>=<value> ...` | writes each setting to the settings file, then reloads |
 | `--show-settings` | prints the live settings the pool holds |
+| `--bans` | prints the bans holding, soonest to end first |
+| `--ban <identity> [--ban-secs <n>]` | bans an identity for `--ban-secs` or the rules' length |
+| `--unban <identity>` | ends an identity's ban |
 
 A pool started with `--data-dir` listens on a Unix domain socket at `<data-dir>/control.sock`
 (mode 0600; never a TCP port, and not the stats interface). A command first connects to that

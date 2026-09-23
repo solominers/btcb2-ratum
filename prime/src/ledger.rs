@@ -3,7 +3,7 @@
 //! is divided by.
 
 pub mod blocks;
-mod db;
+pub(crate) mod db;
 mod snapshot;
 pub mod split;
 mod store;

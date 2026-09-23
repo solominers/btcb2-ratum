@@ -9,16 +9,16 @@ use std::sync::Arc;
 
 /// What a packed row puts between a name of any length and the field after it, since neither
 /// an identity nor a coinbase tag may hold a zero byte.
-pub(super) const NAME_SEPARATOR: u8 = 0x00;
+pub(crate) const NAME_SEPARATOR: u8 = 0x00;
 
-pub(super) fn split_at_separator(rest: &[u8]) -> (&[u8], &[u8]) {
+pub(crate) fn split_at_separator(rest: &[u8]) -> (&[u8], &[u8]) {
     match rest.iter().position(|&b| b == NAME_SEPARATOR) {
         Some(i) => (&rest[..i], &rest[i + 1..]),
         None => (rest, [].as_slice()),
     }
 }
 
-pub(super) trait DbResult<T> {
+pub(crate) trait DbResult<T> {
     fn db(self) -> io::Result<T>;
 }
 
@@ -39,23 +39,23 @@ fn builder() -> Builder {
     b
 }
 
-pub(super) fn create_database(path: &Path) -> io::Result<Arc<Database>> {
+pub(crate) fn create_database(path: &Path) -> io::Result<Arc<Database>> {
     builder().create(path).db().map(Arc::new)
 }
 
 /// Opens an existing database, repairing a file a pool stopped by a signal did not close.
-pub(super) fn open_database(path: &Path) -> io::Result<Database> {
+pub(crate) fn open_database(path: &Path) -> io::Result<Database> {
     builder().open(path).db()
 }
 
 /// A new database in `file`, which must be empty.
-pub(super) fn create_in_file(file: std::fs::File) -> io::Result<Database> {
+pub(crate) fn create_in_file(file: std::fs::File) -> io::Result<Database> {
     builder().create_file(file).db()
 }
 
 /// Runs `f` in a write transaction committed at `Durability::Immediate`, so a row is on disk
 /// before the caller is told it was written.
-pub(super) fn write<T>(
+pub(crate) fn write<T>(
     db: &Database,
     f: impl FnOnce(&redb::WriteTransaction) -> io::Result<T>,
 ) -> io::Result<T> {

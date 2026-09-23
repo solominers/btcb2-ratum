@@ -6,6 +6,7 @@
 
 use crate::cli::{self, Options, ReadError};
 use crate::ledger::split::FeeOutput;
+use crate::limiter::Rules;
 use crate::server::Server;
 use crate::settings;
 use log::{info, warn};
@@ -17,7 +18,7 @@ use std::time::{Duration, SystemTime};
 
 /// The settings a reload applies, by their names in the file. Every other setting applies at
 /// a restart.
-pub const LIVE_SETTINGS: &[&str] = &["fee"];
+pub const LIVE_SETTINGS: &[&str] = &["fee", "hash-limit", "ban-secs", "ban-escalation"];
 
 /// How often the settings file is looked at for a change.
 const WATCH_INTERVAL: Duration = Duration::from_secs(2);
@@ -33,20 +34,24 @@ pub struct State {
 }
 
 /// The live settings as the pool installs them.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Live {
     pub fees: Vec<FeeOutput>,
+    pub rules: Rules,
 }
 
 impl Live {
     /// The live settings `o` names, decoded for `chain` as at startup.
     pub fn from_options(o: &Options, chain: Option<ratum::rpc::Chain>) -> Result<Self, String> {
-        Ok(Self { fees: settings::fees(o, chain)? })
+        Ok(Self { fees: settings::fees(o, chain)?, rules: settings::limiter_rules(o)? })
     }
 
     /// The live settings the pool holds now.
     pub fn current(server: &Server) -> Self {
-        Self { fees: lock(&server.ledger).split_policy().fees.clone() }
+        Self {
+            fees: lock(&server.ledger).split_policy().fees.clone(),
+            rules: lock(&server.limiter).rules().clone(),
+        }
     }
 
     /// Installs these settings where each is read from; the lines describing what changed,
@@ -62,13 +67,26 @@ impl Live {
             ));
             lock(&server.ledger).set_fees(self.fees);
         }
+        if current.rules != self.rules {
+            changes.push(format!(
+                "hashrate limiter: {} (was {})",
+                one_line(&self.rules.describe()),
+                one_line(&current.rules.describe())
+            ));
+            lock(&server.limiter).set_rules(self.rules);
+        }
         changes
     }
 
     /// The settings, one line each, as `--show-settings` prints them.
     pub fn describe(&self) -> String {
-        format!("fee: {}\n", fees_text(&self.fees))
+        format!("fee: {}\n{}", fees_text(&self.fees), self.rules.describe())
     }
+}
+
+/// A multi-line description on one line.
+fn one_line(text: &str) -> String {
+    text.trim_end().replace('\n', "; ")
 }
 
 /// The fees as one line: each address and its basis points, or `none`.
@@ -320,6 +338,16 @@ mod tests {
         let text = reload(&server).unwrap();
         assert!(Live::current(&server).fees.is_empty(), "a fee removed from the file is removed");
         assert!(!text.contains("restart"), "back to the startup value: {text}");
+
+        let limits = "hash-limit = [\"1m=100T\", \"2h=3.5T\"]\nban-secs = 3600\n";
+        std::fs::write(&path, limits).unwrap();
+        let text = reload(&server).unwrap();
+        assert!(text.contains("hashrate limiter: hash-limit: 1m 100 TH/s, 2h 3.50 TH/s"), "{text}");
+        let rules = Live::current(&server).rules;
+        assert_eq!((rules.brackets.len(), rules.ban_secs, rules.escalation), (2, 3600, 1.0));
+        std::fs::write(&path, "ban-escalation = 0.5\n").unwrap();
+        assert!(reload(&server).unwrap_err().contains("--ban-escalation"));
+        assert_eq!(Live::current(&server).rules, rules, "refused: unchanged");
     }
 
     #[test]
@@ -387,11 +415,16 @@ mod tests {
 
     #[test]
     fn the_settings_are_described_one_per_line() {
-        let live = Live { fees: fee_outputs(&[(FEE_ADDRESS, 25), (ALICE, 100)]) };
+        let rules = Rules::default();
+        let live =
+            Live { fees: fee_outputs(&[(FEE_ADDRESS, 25), (ALICE, 100)]), rules: rules.clone() };
         assert_eq!(
             live.describe(),
-            format!("fee: {FEE_ADDRESS} 25 bps (0.25%), {ALICE} 100 bps (1%) (125 bps together)\n")
+            format!(
+                "fee: {FEE_ADDRESS} 25 bps (0.25%), {ALICE} 100 bps (1%) (125 bps together)\n\
+                 hash-limit: none\n"
+            )
         );
-        assert_eq!(Live { fees: Vec::new() }.describe(), "fee: none\n");
+        assert_eq!(Live { fees: Vec::new(), rules }.describe(), "fee: none\nhash-limit: none\n");
     }
 }

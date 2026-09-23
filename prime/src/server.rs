@@ -5,6 +5,7 @@ use crate::accounting::{ACCEPTED_HASH_RETENTION_SECS, AcceptedShareHashes, MAX_A
 use crate::bounded::BoundedSet;
 use crate::ledger::Ledger;
 use crate::ledger::blocks::BlockRecords;
+use crate::limiter::Limiter;
 use crate::live;
 use crate::node::NodeState;
 use crate::sessions::SessionStore;
@@ -47,6 +48,8 @@ pub struct Server {
     pub relayed_blocks: Mutex<BoundedSet<[u8; 32]>>,
     /// What the live settings keep between readings of the settings file.
     pub live: live::State,
+    /// The hashrate limiter: each identity's recent shares and the bans.
+    pub limiter: Mutex<Limiter>,
 }
 
 impl Server {
@@ -56,6 +59,7 @@ impl Server {
         pool_keys: KeyPairs,
         node: rpc::Client,
         (ledger, records): (Ledger, BlockRecords),
+        limiter: Limiter,
     ) -> io::Result<Self> {
         let config_payload = share_policy.config.encode().map_err(|e| {
             io::Error::new(
@@ -80,6 +84,7 @@ impl Server {
             txn_cache: Mutex::new(TxnCache::default()),
             relayed_blocks: Mutex::new(BoundedSet::new(MAX_RELAYED_BLOCKS)),
             live: live::State::default(),
+            limiter: Mutex::new(limiter),
         })
     }
 

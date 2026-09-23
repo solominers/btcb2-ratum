@@ -6,6 +6,7 @@ use crate::ledger::WindowRule;
 use crate::ledger::split::{
     FeeOutput, MAX_FEE_OUTPUTS, MAX_TOTAL_FEE_BPS, PublicGateway, SplitPolicy,
 };
+use crate::limiter::{self, Rules};
 use crate::payout;
 use crate::verify::SharePolicy;
 use log::warn;
@@ -148,6 +149,17 @@ pub fn fees(o: &Options, chain: Option<rpc::Chain>) -> Result<Vec<FeeOutput>, St
         ));
     }
     Ok(fees)
+}
+
+/// The hashrate limiter's rules: `--hash-limit`, `--ban-secs` (a day by default) and
+/// `--ban-escalation` (1 by default). This is the one reading of them: startup and every
+/// reload use it.
+pub fn limiter_rules(o: &Options) -> Result<Rules, String> {
+    limiter::rules_from(
+        &o.hash_limit,
+        o.ban_secs.unwrap_or(ratum::SECS_PER_DAY),
+        o.ban_escalation.unwrap_or(1.0),
+    )
 }
 
 /// `amount` as basis points: an integer, or a percentage with a `%` rounded to the nearest

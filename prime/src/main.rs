@@ -15,6 +15,7 @@ mod control;
 mod fixtures;
 mod keys;
 mod ledger;
+mod limiter;
 mod live;
 mod node;
 mod payout;
@@ -157,7 +158,7 @@ fn raise_open_file_limit(max_connections: usize) {
     }
 }
 
-fn report_settings(s: &Settings, ledger: &Ledger) {
+fn report_settings(s: &Settings, ledger: &Ledger, limiter: &limiter::Limiter) {
     let (window, split) = (ledger.window_rule(), ledger.split_policy());
     info!(
         "payouts: window {}x network difficulty ({} at startup), operator fee: {}",
@@ -173,6 +174,7 @@ fn report_settings(s: &Settings, ledger: &Ledger) {
             gateway.fee_bps, gateway.tag, gateway.subsidy_bps
         );
     }
+    info!("hashrate limiter: {}", limiter.rules().describe().trim_end().replace('\n', "; "));
     if s.require_v3 {
         info!(
             "version 3 protocol required: a hello without the DRS extension is refused, so \
@@ -206,6 +208,7 @@ fn main() -> io::Result<()> {
     let share = settings::share_policy(&options, chain).unwrap_or_else(|e| cli::fatal!("{e}"));
     info!("pool payout script: {}", hex::encode(&share.config.payout_script));
     let fees = settings::fees(&options, chain).unwrap_or_else(|e| cli::fatal!("{e}"));
+    let rules = settings::limiter_rules(&options).unwrap_or_else(|e| cli::fatal!("{e}"));
 
     // Bound before the ledger opens, so a second pool on the data directory is refused here,
     // naming this one; dropped when main returns, which removes the socket file. A socket
@@ -235,9 +238,13 @@ fn main() -> io::Result<()> {
         chain.map(rpc::Chain::name),
         ledger,
     )?;
-    report_settings(&s, &ledger);
+    let limiter = match ledger.file() {
+        Some((db, _)) => limiter::Limiter::open(rules, db)?,
+        None => limiter::Limiter::new(rules),
+    };
+    report_settings(&s, &ledger, &limiter);
 
-    let server = Arc::new(Server::new(s, share, pool_keys, node, (ledger, records))?);
+    let server = Arc::new(Server::new(s, share, pool_keys, node, (ledger, records), limiter)?);
     let s = &server.settings;
     raise_open_file_limit(s.max_connections);
 

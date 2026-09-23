@@ -47,6 +47,17 @@ pub enum Command {
     },
     /// `--show-settings`.
     ShowSettings,
+    /// `--bans`.
+    Bans,
+    /// `--ban <identity>`, for `--ban-secs` when given.
+    Ban {
+        identity: String,
+        secs: Option<u64>,
+    },
+    /// `--unban <identity>`.
+    Unban {
+        identity: String,
+    },
 }
 
 impl Command {
@@ -73,6 +84,15 @@ impl Command {
         if o.show_settings {
             return Some(Self::ShowSettings);
         }
+        if o.bans {
+            return Some(Self::Bans);
+        }
+        if let Some(identity) = &o.ban {
+            return Some(Self::Ban { identity: identity.clone(), secs: o.ban_secs });
+        }
+        if let Some(identity) = &o.unban {
+            return Some(Self::Unban { identity: identity.clone() });
+        }
         let path = o.snapshot.as_ref()?;
         let path = std::path::absolute(path).unwrap_or_else(|_| PathBuf::from(path));
         Some(Self::Snapshot { path })
@@ -88,6 +108,9 @@ impl Command {
             Self::Reload => "--reload",
             Self::Set { .. } => "--set",
             Self::ShowSettings => "--show-settings",
+            Self::Bans => "--bans",
+            Self::Ban { .. } => "--ban",
+            Self::Unban { .. } => "--unban",
         }
     }
 }
@@ -101,7 +124,11 @@ impl fmt::Display for Command {
                 write!(f, " {arg}")?;
                 owed.iter().try_for_each(|entry| write!(f, " --owed {entry}"))
             }
-            Self::DumpLedger | Self::Reload | Self::ShowSettings => Ok(()),
+            Self::DumpLedger | Self::Reload | Self::ShowSettings | Self::Bans => Ok(()),
+            Self::Ban { identity, secs: Some(secs) } => write!(f, " {identity} --ban-secs {secs}"),
+            Self::Ban { identity, secs: None } | Self::Unban { identity } => {
+                write!(f, " {identity}")
+            }
             Self::Snapshot { path } => write!(f, " {}", path.display()),
             Self::Set { assignments } => assignments.iter().try_for_each(|a| write!(f, " {a:?}")),
         }
@@ -201,7 +228,12 @@ pub fn execute(
             )?;
             Ok(())
         }
-        Command::Reload | Command::Set { .. } | Command::ShowSettings => {
+        Command::Reload
+        | Command::Set { .. }
+        | Command::ShowSettings
+        | Command::Bans
+        | Command::Ban { .. }
+        | Command::Unban { .. } => {
             let Some(server) = access.server() else {
                 return Err(Failure::Usage(format!(
                     "{} runs in the pool that owns the data directory, over its control \
@@ -212,7 +244,11 @@ pub fn execute(
             let text = match command {
                 Command::Reload => live::reload(server),
                 Command::Set { assignments } => live::set(server, assignments),
-                _ => Ok(live::show(server)),
+                Command::ShowSettings => Ok(live::show(server)),
+                Command::Bans => Ok(bans_text(server, now)),
+                Command::Ban { identity, secs } => ban(server, identity, *secs, now),
+                Command::Unban { identity } => unban(server, identity, now),
+                _ => unreachable!("matched above"),
             }
             .map_err(Failure::Usage)?;
             out.write_all(text.as_bytes())?;
@@ -228,11 +264,74 @@ pub fn execute(
                 | Command::Snapshot { .. }
                 | Command::Reload
                 | Command::Set { .. }
-                | Command::ShowSettings => unreachable!("matched above"),
+                | Command::ShowSettings
+                | Command::Bans
+                | Command::Ban { .. }
+                | Command::Unban { .. } => unreachable!("matched above"),
             })?;
             out.write_all(text.as_bytes())?;
             result
         }
+    }
+}
+
+/// `--bans`: every ban holding at `now`, one per line, soonest to end first.
+fn bans_text(server: &Server, now: u64) -> String {
+    use std::fmt::Write as _;
+    let bans = ratum::lock(&server.limiter).active_bans(now);
+    if bans.is_empty() {
+        return "no bans\n".to_string();
+    }
+    let mut text = String::new();
+    for b in bans {
+        writeln!(
+            text,
+            "{} until {} ({}s more; ban {} since {}): {}",
+            b.identity,
+            b.until,
+            b.until.saturating_sub(now),
+            b.times,
+            b.since,
+            b.reason
+        )
+        .unwrap();
+    }
+    text
+}
+
+/// `--ban`: bans `identity` from `now`, for `secs` or the rules' length.
+fn ban(server: &Server, identity: &str, secs: Option<u64>, now: u64) -> Result<String, String> {
+    let identity = ratum::username::identity_of(identity).into_owned();
+    if identity.is_empty() {
+        return Err("--ban takes the identity to ban (a payout address)".to_string());
+    }
+    if secs == Some(0) {
+        return Err("--ban-secs must be above 0".to_string());
+    }
+    let reason = "banned by the operator".to_string();
+    let ban = ratum::lock(&server.limiter).ban(&identity, now, secs, reason);
+    log::warn!(
+        "control: {identity} banned until {} (ban {}, {}s) by the operator",
+        ban.until,
+        ban.times,
+        ban.until.saturating_sub(ban.since)
+    );
+    Ok(format!(
+        "{identity} banned until {} ({}s; ban {})\n",
+        ban.until,
+        ban.until - ban.since,
+        ban.times
+    ))
+}
+
+/// `--unban`: ends the ban on `identity`.
+fn unban(server: &Server, identity: &str, now: u64) -> Result<String, String> {
+    let identity = ratum::username::identity_of(identity).into_owned();
+    if ratum::lock(&server.limiter).unban(&identity, now) {
+        log::info!("control: the ban on {identity} was ended by the operator");
+        Ok(format!("the ban on {identity} is ended\n"))
+    } else {
+        Err(format!("{identity} is not banned"))
     }
 }
 

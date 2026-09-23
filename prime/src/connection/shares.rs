@@ -24,7 +24,8 @@ use ratum::datum::messages::abw::CandidateRef;
 use ratum::datum::messages::share::PowSubmit;
 use ratum::datum::messages::share_response::{RejectReason, ShareResponse, ShareVerdict};
 use ratum::datum::messages::validation::{self, TxnList};
-use ratum::username::address_of;
+use ratum::lock;
+use ratum::username::{address_of, identity_of};
 use std::io;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -555,19 +556,41 @@ impl Connection<'_> {
         Ok(ShareOutcome { verdict, raw_pow_hash })
     }
 
-    /// Records the share's credit, or refuses it when its identity cannot be paid or the ledger
-    /// cannot record it.
+    /// Records the share's credit, or refuses it when its identity cannot be paid, is banned
+    /// by the hashrate limiter, or the ledger cannot record it. A credited share is then
+    /// observed by the limiter, whose ban begins with the next share.
     fn credit(&mut self, s: &PowSubmit, rebuilt: &RebuiltShare, now: u64) -> ShareVerdict {
         if self.refuse_if_unpayable(&s.username) {
             return ShareVerdict::Rejected(RejectReason::BadUsername);
         }
         let peer = self.peer;
+        let identity = identity_of(&s.username);
+        if let Some(ban) = lock(&self.server.limiter).ban_of(&identity, now) {
+            debug!(
+                "[{peer}]   <- rejected: {identity} is banned for {}s more ({})",
+                ban.until.saturating_sub(now),
+                ban.reason
+            );
+            return ShareVerdict::Rejected(RejectReason::HashLimit);
+        }
         if let Err(e) = accounting::credit_share(self.server, peer, &s.username, rebuilt, now) {
             error!(
                 "[{peer}]   !! could not record the share to the ledger ({e}); it is not \
                  credited, and is answered as refused"
             );
             return ShareVerdict::Rejected(RejectReason::Other);
+        }
+        let ntime = u64::from(s.block_time());
+        let banned = lock(&self.server.limiter).observe(&identity, ntime, rebuilt.difficulty, now);
+        if let Some(ban) = banned {
+            warn!(
+                "[{peer}]   ** {identity} banned until {} (ban {}, {}s): {}; its shares are \
+                 refused until then",
+                ban.until,
+                ban.times,
+                ban.until.saturating_sub(ban.since),
+                ban.reason
+            );
         }
         ShareVerdict::Accepted
     }

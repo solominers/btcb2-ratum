@@ -63,6 +63,17 @@ pub struct Options {
     /// Whether the pool re-reads the settings file when it changes (on by default).
     #[arg(long, num_args = 0..=1, default_missing_value = "true")]
     pub watch_config: Option<bool>,
+    /// Each hashrate bracket as `PERIOD=RATE` (`1m=100T`); comma-separated on the command
+    /// line, a list in the file. Live.
+    #[arg(long, value_name = "PERIOD=RATE", value_delimiter = ',')]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hash_limit: Vec<String>,
+    /// How long a ban runs; with `--ban`, the length of that ban. Live.
+    #[arg(long)]
+    pub ban_secs: Option<u64>,
+    /// The factor each repeat ban is longer by. Live.
+    #[arg(long)]
+    pub ban_escalation: Option<f64>,
     #[arg(long)]
     pub public_gateway_fee_bps: Option<u16>,
     #[arg(long)]
@@ -108,6 +119,18 @@ pub struct Options {
     #[arg(long)]
     #[serde(skip)]
     pub show_settings: bool,
+    /// Print the bans holding in the running pool.
+    #[arg(long)]
+    #[serde(skip)]
+    pub bans: bool,
+    /// Ban an identity in the running pool, for `--ban-secs` or the rules' length.
+    #[arg(long, value_name = "IDENTITY")]
+    #[serde(skip)]
+    pub ban: Option<String>,
+    /// End the ban on an identity in the running pool.
+    #[arg(long, value_name = "IDENTITY")]
+    #[serde(skip)]
+    pub unban: Option<String>,
 }
 
 /// The options as `load` resolved them: the command line over the file, and what the file
@@ -283,6 +306,9 @@ mod tests {
             "reload = true\n",
             "set = [\"fee=[]\"]\n",
             "show-settings = true\n",
+            "bans = true\n",
+            "ban = \"x\"\n",
+            "unban = \"x\"\n",
         ] {
             let e = parse_toml(text).expect_err("a command is not a setting").to_string();
             assert!(e.contains("unknown field"), "{text:?}: {e}");

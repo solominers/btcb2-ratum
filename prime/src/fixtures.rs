@@ -5,6 +5,7 @@ use crate::cli::Options;
 use crate::ledger::blocks::{BlockRecords, FoundBlock, OwedBlock};
 use crate::ledger::split::{FeeOutput, Payout, PublicGateway, SplitPolicy};
 use crate::ledger::{Ledger, Share, WindowRule};
+use crate::limiter::{Limiter, Rules};
 use crate::server::Server;
 use crate::settings::Resolved;
 use crate::verify::SharePolicy;
@@ -94,7 +95,9 @@ pub fn server(ledger: Ledger, records: BlockRecords, node_url: &str) -> Server {
         chain: Some(rpc::Chain::Regtest),
     };
     let node = rpc::Client::new(node_url, "u", "p", None).unwrap();
-    Server::new(settings, share_policy, KeyPairs::generate(), node, (ledger, records)).unwrap()
+    let limiter = Limiter::new(Rules::default());
+    Server::new(settings, share_policy, KeyPairs::generate(), node, (ledger, records), limiter)
+        .unwrap()
 }
 
 /// A server whose window holds 100 work from `ALICE` on the public gateway (tag "public") and

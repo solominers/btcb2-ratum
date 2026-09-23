@@ -252,6 +252,9 @@ fn owed_json(
 
 fn miners_json(server: &Server, l: &LedgerView) -> Vec<Value> {
     let chain = server.share_policy.chain;
+    let now = ratum::unix_now();
+    let banned_until: HashMap<String, u64> =
+        lock(&server.limiter).active_bans(now).into_iter().map(|b| (b.identity, b.until)).collect();
     l.miners
         .iter()
         .map(|m| {
@@ -270,6 +273,7 @@ fn miners_json(server: &Server, l: &LedgerView) -> Vec<Value> {
                 "unpayable_reason": unpayable_reason,
                 "tag": m.state.tag_secondary,
                 "own_gateway_work": m.state.own_gateway_work.to_string(),
+                "banned_until": banned_until.get(&m.identity),
             })
         })
         .collect()
@@ -431,6 +435,12 @@ pub(crate) fn snapshot(server: &Server, history: &Mutex<HashrateHistory>) -> Val
     let public_gateway_fee_detail = public_gateway_fee_json(&l, coinbase_value);
     let network = network_json(tip, coinbase_value, server.node_state.observed_block_seconds());
     let pool_hs = hashes_per_second(l.recent_work, HASHRATE_SPAN_SECS);
+    let limiter = {
+        let limiter = lock(&server.limiter);
+        let mut v = limiter.rules().json();
+        v["bans"] = limiter.active_bans(ratum::unix_now()).iter().map(|b| b.json()).collect();
+        v
+    };
 
     json!({
         "pool": {
@@ -472,6 +482,7 @@ pub(crate) fn snapshot(server: &Server, history: &Mutex<HashrateHistory>) -> Val
             "miners": miners,
         },
         "public_gateway_fee": public_gateway_fee_detail,
+        "limiter": limiter,
         "owed": {
             "unsettled_sats": owed.unsettled_sats,
             "by_identity": owed.by_identity,

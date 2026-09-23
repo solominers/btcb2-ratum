@@ -43,6 +43,8 @@ wire_codes! {
         HeaderMerkleMismatch = 42,
         NoSplit = 43,
         BadAbwSlot = 44,
+        /// The identity is banned: its hashrate went over the pool's limit.
+        HashLimit = 45,
     }
     unknown Unknown;
 }
@@ -145,7 +147,7 @@ mod tests {
                 verdicts.push(ShareVerdict::Rejected(r));
             }
         }
-        assert_eq!(verdicts.len(), 2 + 26, "every reject reason is covered");
+        assert_eq!(verdicts.len(), 2 + 27, "every reject reason is covered");
         for verdict in verdicts {
             let r = ShareResponse { verdict, ..base };
             assert_eq!(ShareResponse::decode(&r.encode()), Ok(r), "{verdict:?}");
