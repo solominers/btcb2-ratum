@@ -587,6 +587,13 @@ impl Connection<'_> {
             );
             self.identity = Some(identity.to_string());
         }
+        lock(&self.server.workers).note(
+            &identity,
+            crate::workers::worker_name(&s.username),
+            peer,
+            rebuilt.difficulty,
+            now,
+        );
         let ntime = u64::from(s.block_time());
         let banned = lock(&self.server.limiter).observe(&identity, ntime, rebuilt.difficulty, now);
         if let Some(ban) = banned {

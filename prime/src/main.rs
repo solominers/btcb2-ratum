@@ -26,6 +26,7 @@ mod settings;
 mod stats;
 mod txns;
 mod verify;
+mod workers;
 
 use connection::handle;
 use ledger::{Ledger, LedgerLocation};

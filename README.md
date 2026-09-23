@@ -774,7 +774,11 @@ same string), an approximate hashrate (accepted-share difficulty over the last 1
 at 2^32 hashes per difficulty unit, for the pool and per miner) and each miner's share of the
 window with `payable`, `unpayable_reason`, `tag` (the secondary coinbase tag of the
 miner's newest share in the window, the gateway's `mining.coinbase_tag_secondary`),
-and `own_gateway_work`; the window carries `work` against `target_work`, the `shares` it
+and `own_gateway_work`, and its `workers`: each rig the identity's shares named after its
+address (`bc1q....rig3`) that sent a share within the last hour, with its `hashrate_hs` over
+the same 10 minutes, `last_share_at`, `shares` since the pool started and `gateway`, a short
+tag of the gateway connection its newest share came through (at most 256 per identity, held
+in memory only); the window carries `work` against `target_work`, the `shares` it
 holds against the `max_shares` it may hold, and `count_capped`, true while the count bound
 rather than `target_work` is what ends it, so a reader can tell a window still filling from
 one that has stopped short; `public_gateway_fee` (null unless `--public-gateway-fee-bps` is set)

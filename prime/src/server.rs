@@ -12,6 +12,7 @@ use crate::sessions::SessionStore;
 use crate::settings::Settings;
 use crate::txns::TxnCache;
 use crate::verify::SharePolicy;
+use crate::workers::Workers;
 use log::info;
 use ratum::datum::handshake::ResumeToken;
 use ratum::datum::keys::KeyPairs;
@@ -50,6 +51,8 @@ pub struct Server {
     pub live: live::State,
     /// The hashrate limiter: each identity's recent shares and the bans.
     pub limiter: Mutex<Limiter>,
+    /// The rigs behind each identity, for the stats interface.
+    pub workers: Mutex<Workers>,
 }
 
 impl Server {
@@ -85,6 +88,7 @@ impl Server {
             relayed_blocks: Mutex::new(BoundedSet::new(MAX_RELAYED_BLOCKS)),
             live: live::State::default(),
             limiter: Mutex::new(limiter),
+            workers: Mutex::new(Workers::default()),
         })
     }
 

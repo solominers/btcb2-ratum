@@ -255,6 +255,7 @@ fn miners_json(server: &Server, l: &LedgerView) -> Vec<Value> {
     let now = ratum::unix_now();
     let banned_until: HashMap<String, u64> =
         lock(&server.limiter).active_bans(now).into_iter().map(|b| (b.identity, b.until)).collect();
+    let workers = lock(&server.workers);
     l.miners
         .iter()
         .map(|m| {
@@ -275,6 +276,13 @@ fn miners_json(server: &Server, l: &LedgerView) -> Vec<Value> {
                 "own_gateway_work": m.state.own_gateway_work.to_string(),
                 "banned_until": banned_until.get(&m.identity),
                 "carry_work": m.carry.to_string(),
+                "workers": workers.of(&m.identity, now).iter().map(|w| json!({
+                    "name": w.name,
+                    "hashrate_hs": w.hashrate_hs,
+                    "last_share_at": w.last_share_at,
+                    "shares": w.shares,
+                    "gateway": w.gateway,
+                })).collect::<Vec<_>>(),
             })
         })
         .collect()
