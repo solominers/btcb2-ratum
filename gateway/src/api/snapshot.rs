@@ -163,6 +163,7 @@ pub(super) fn status_json(ctx: &Context, with_clients: bool) -> Value {
         "secondary_tag": cfg.mining.coinbase_tag_secondary,
         "pool_min_diff": pool.as_ref().map(|p| p.min_difficulty),
         "pool_motd": gateway.pool.motd(),
+        "pool_ban_notice": gateway.pool.ban_notice().map(|n| json!({"at": n.unix_at, "message": n.message})),
         "stratum": {
             "listening": gateway.stratum.listening.load(Ordering::Relaxed),
             "connections": summary.connections,

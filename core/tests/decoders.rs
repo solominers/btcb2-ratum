@@ -531,7 +531,7 @@ fn a_damaged_hello_is_refused_without_panicking() {
     let pool = pool_keys();
     let mut client = ClientChannel::with_key_pairs(KeyPairs::generate(), KeyPairs::generate(), 77);
     let resume = Some([0x42; RESUME_TOKEN_LEN]);
-    let wire = client.hello(&pool.box_pk, "v0.1/decoders", ProtocolVersion::V3 { resume });
+    let wire = client.hello(&pool.box_pk, "v0.1/decoders", ProtocolVersion::V3 { resume }, None);
     let header = HeaderKeyRatchet::initial().unmask(wire[..FRAME_HEADER_LEN].try_into().unwrap());
     let payload = &wire[FRAME_HEADER_LEN..];
     assert_eq!(header, hello_header(payload.len()));

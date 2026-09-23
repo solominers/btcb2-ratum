@@ -56,6 +56,8 @@ pub struct ClientEntry {
     pub unique_id: u64,
     pub kill_requested: AtomicBool,
     pub stats: Mutex<ClientStats>,
+    /// A `client.show_message` for the connection thread to send when it wakes.
+    pub message: Mutex<Option<String>>,
     waker: Waker,
 }
 
@@ -68,6 +70,11 @@ impl ClientEntry {
 
     fn request_kill(&self) {
         self.kill_requested.store(true, Ordering::Relaxed);
+        self.wake();
+    }
+
+    fn show_message(&self, text: &str) {
+        *lock(&self.message) = Some(text.to_string());
         self.wake();
     }
 }
@@ -162,6 +169,14 @@ impl State {
                 keep(&st).then(|| (c.unique_id, st.clone()))
             })
             .collect()
+    }
+
+    /// Sends `client.show_message` with `text` to every connected client, which a miner
+    /// that supports the method displays.
+    pub fn show_message_all(&self, text: &str) {
+        for c in lock(&self.clients).values() {
+            c.show_message(text);
+        }
     }
 
     pub fn shutdown_all(&self) {
@@ -276,6 +291,7 @@ mod tests {
             Arc::new(ClientEntry {
                 unique_id,
                 kill_requested: AtomicBool::new(false),
+                message: Mutex::new(None),
                 waker,
                 stats: Mutex::new(ClientStats {
                     subscribed_at: Some(Instant::now()),

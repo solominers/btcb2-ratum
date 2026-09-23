@@ -123,6 +123,23 @@ pub fn handle(stream: TcpStream, server: &Server) -> io::Result<()> {
         },
     );
 
+    let identity = hello.identity.as_deref().and_then(|address| {
+        let identity = ratum::username::identity_of(address).into_owned();
+        if payout::address_script(&identity, server.share_policy.chain).is_some() {
+            info!(
+                "[{peer}]      {identity} is this connection's identity (from its hello): \
+                 the finder's cut of every split dictated to it"
+            );
+            Some(identity)
+        } else {
+            warn!(
+                "[{peer}]      the hello names {address:?} as the gateway's identity, which is \
+                 {}; the first share's identity is taken instead",
+                payout::unpayable_reason(server.share_policy.chain)
+            );
+            None
+        }
+    });
     let (response, channel): (Vec<u8>, ServerChannel) =
         match accept(hello, &server.pool_keys, &server.settings.motd) {
             Ok(v) => v,
@@ -157,7 +174,7 @@ pub fn handle(stream: TcpStream, server: &Server) -> io::Result<()> {
         resumed_from: None,
         proven: false,
         bulk: Reassembler::new(),
-        identity: None,
+        identity,
     };
 
     match protocol_version {
@@ -194,8 +211,9 @@ struct Connection<'a> {
     last_send_at: Instant,
     client_sign_pk: [u8; 32],
     v3: Option<V3Session>,
-    /// The identity of the first share credited on this connection: the one address this
-    /// gateway is a ticket for, paid the finder's cut in every split dictated to it after.
+    /// The one address this gateway is a ticket for, paid the finder's cut in every split
+    /// dictated to it: the address its hello's identity extension names, else the identity
+    /// of the first share credited on the connection.
     identity: Option<String>,
     /// The token of the saved session this connection holds a copy of, until `proven`
     /// removes that session from the store.

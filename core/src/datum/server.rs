@@ -5,7 +5,8 @@
 use super::channel::{Channel, Error, open_sealed, seal_signed, split_signed, verify};
 use super::framing::{self, FrameHeader, HeaderKeys, SessionNonces};
 use super::handshake::{
-    DRS_FLAG_AT, DRS_MARKER, DRS_TOKEN_AT, ProtocolVersion, RESUME_TOKEN_LEN, ResumeToken,
+    DRS_FLAG_AT, DRS_MARKER, DRS_TOKEN_AT, IDENTITY_MARKER, MAX_IDENTITY_LEN, ProtocolVersion,
+    RESUME_TOKEN_LEN, ResumeToken,
 };
 use super::keys::{KeyPairs, PUBLIC_KEYS_LEN, PublicKeys};
 use super::messages::STRUCT_END;
@@ -23,6 +24,9 @@ pub struct Hello {
     pub user_agent: String,
     pub nk: u32,
     pub protocol_version: ProtocolVersion,
+    /// The payout address the gateway's identity extension names, as written; none without
+    /// the extension.
+    pub identity: Option<String>,
 }
 
 pub fn open_hello(header: FrameHeader, payload: &[u8], pool: &KeyPairs) -> Result<Hello, Error> {
@@ -51,23 +55,40 @@ pub fn open_hello(header: FrameHeader, payload: &[u8], pool: &KeyPairs) -> Resul
     let nk = u32::from_le_bytes(after[1..AFTER_UA_LEN].try_into().expect("AFTER_UA_LEN - 1 bytes"));
 
     let tail = &after[AFTER_UA_LEN..];
-    let protocol_version = if tail.len() > DRS_FLAG_AT && tail[..DRS_FLAG_AT] == DRS_MARKER {
-        let resume = if tail[DRS_FLAG_AT] != 0 {
-            let token: ResumeToken = tail
-                .get(DRS_TOKEN_AT..DRS_TOKEN_AT + RESUME_TOKEN_LEN)
-                .ok_or(Error::Malformed("DRS flag set without a token"))?
-                .try_into()
-                .expect("length checked");
-            Some(token)
+    let (protocol_version, extensions_at) =
+        if tail.len() > DRS_FLAG_AT && tail[..DRS_FLAG_AT] == DRS_MARKER {
+            let resume = if tail[DRS_FLAG_AT] != 0 {
+                let token: ResumeToken = tail
+                    .get(DRS_TOKEN_AT..DRS_TOKEN_AT + RESUME_TOKEN_LEN)
+                    .ok_or(Error::Malformed("DRS flag set without a token"))?
+                    .try_into()
+                    .expect("length checked");
+                Some(token)
+            } else {
+                None
+            };
+            let after_drs = DRS_TOKEN_AT + if resume.is_some() { RESUME_TOKEN_LEN } else { 0 };
+            (ProtocolVersion::V3 { resume }, after_drs)
         } else {
-            None
+            (ProtocolVersion::V1, 0)
         };
-        ProtocolVersion::V3 { resume }
-    } else {
-        ProtocolVersion::V1
-    };
+    let identity = read_identity(tail.get(extensions_at..).unwrap_or_default());
 
-    Ok(Hello { client, session, user_agent, nk, protocol_version })
+    Ok(Hello { client, session, user_agent, nk, protocol_version, identity })
+}
+
+/// The identity extension at the head of `bytes`, if one is there: the marker, a length and
+/// the address. The pad after the extensions is one byte repeated, which never reads as the
+/// marker.
+fn read_identity(bytes: &[u8]) -> Option<String> {
+    let rest = bytes.strip_prefix(&IDENTITY_MARKER)?;
+    let (&len, rest) = rest.split_first()?;
+    let len = usize::from(len);
+    if len == 0 || len > MAX_IDENTITY_LEN {
+        return None;
+    }
+    let identity = rest.get(..len)?;
+    Some(String::from_utf8_lossy(identity).into_owned())
 }
 
 pub struct ServerChannel {
@@ -176,6 +197,34 @@ pub(crate) mod tests {
         assert_eq!(hello.user_agent, "v0.4.1-beta/deadbeef");
         assert_eq!(hello.nk, nk);
         assert_eq!(hello.session, session.public());
+        assert_eq!(hello.identity, None);
+    }
+
+    #[test]
+    fn the_identity_extension_is_read_on_either_protocol_version_and_left_out_when_not_sent() {
+        let pool = KeyPairs::generate();
+        let address = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
+        for version in [
+            ProtocolVersion::V1,
+            ProtocolVersion::V3 { resume: None },
+            ProtocolVersion::V3 { resume: Some([9u8; RESUME_TOKEN_LEN]) },
+        ] {
+            let mut client = client_with_generated_keys(7);
+            let wire = client.hello(&pool.box_pk, "ua", version, Some(address));
+            let hello = server_read_hello(&wire, &pool).unwrap();
+            assert_eq!(hello.identity.as_deref(), Some(address), "{version:?}");
+            assert_eq!(hello.protocol_version, version);
+            let mut client = client_with_generated_keys(7);
+            let wire = client.hello(&pool.box_pk, "ua", version, None);
+            assert_eq!(server_read_hello(&wire, &pool).unwrap().identity, None, "{version:?}");
+        }
+        let mut client = client_with_generated_keys(7);
+        let long = "x".repeat(MAX_IDENTITY_LEN + 1);
+        let wire = client.hello(&pool.box_pk, "ua", ProtocolVersion::V1, Some(&long));
+        assert_eq!(server_read_hello(&wire, &pool).unwrap().identity, None, "too long: left out");
+        let mut client = client_with_generated_keys(7);
+        let wire = client.hello(&pool.box_pk, "ua", ProtocolVersion::V1, Some(""));
+        assert_eq!(server_read_hello(&wire, &pool).unwrap().identity, None, "empty: left out");
     }
 
     #[test]
@@ -183,7 +232,7 @@ pub(crate) mod tests {
         let pool = KeyPairs::generate();
         let other = KeyPairs::generate();
         let mut client = client_with_generated_keys(7);
-        let wire = client.hello(&other.box_pk, "v0.4.1-beta", ProtocolVersion::V1);
+        let wire = client.hello(&other.box_pk, "v0.4.1-beta", ProtocolVersion::V1, None);
         assert!(matches!(server_read_hello(&wire, &pool), Err(Error::Unseal)));
     }
 
@@ -191,7 +240,7 @@ pub(crate) mod tests {
     fn rejects_hello_whose_sealed_bytes_are_altered() {
         let pool = KeyPairs::generate();
         let mut client = client_with_generated_keys(7);
-        let mut bad = client.hello(&pool.box_pk, "v0.4.1-beta", ProtocolVersion::V1);
+        let mut bad = client.hello(&pool.box_pk, "v0.4.1-beta", ProtocolVersion::V1, None);
         let n = bad.len();
         bad[n - 1] ^= 0x01;
         assert!(matches!(server_read_hello(&bad, &pool), Err(Error::Unseal)));

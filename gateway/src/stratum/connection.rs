@@ -93,6 +93,7 @@ impl Connection {
         let sid = (unique_id as u32) ^ SESSION_ID_XOR;
         let entry = Arc::new(ClientEntry {
             kill_requested: AtomicBool::new(false),
+            message: Mutex::new(None),
             waker,
             unique_id,
             stats: Mutex::new(ClientStats {
@@ -139,6 +140,16 @@ impl Connection {
         loop {
             if self.entry.kill_requested.load(Ordering::Relaxed) {
                 return Err(Disconnect::Killed);
+            }
+            let message = lock(&self.entry.message).take();
+            if let Some(text) = message {
+                let line = serde_json::json!({
+                    "id": serde_json::Value::Null,
+                    "method": "client.show_message",
+                    "params": [text],
+                })
+                .to_string();
+                self.send_line(line)?;
             }
             if self.stats().subscribed()
                 && let Some(published) = self.gateway.jobs.current()

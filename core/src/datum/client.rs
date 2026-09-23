@@ -6,7 +6,8 @@ use super::channel::{
 };
 use super::framing::{self, FrameHeader, HeaderKeys, SessionNonces};
 use super::handshake::{
-    DRS_MARKER, DRS_RESUME_PRESENT, DRS_TOKEN_AT, ProtocolVersion, RESUME_TOKEN_LEN,
+    DRS_MARKER, DRS_RESUME_PRESENT, DRS_TOKEN_AT, IDENTITY_MARKER, MAX_IDENTITY_LEN,
+    ProtocolVersion, RESUME_TOKEN_LEN,
 };
 use super::keys::{KeyPairs, PUBLIC_KEYS_LEN, PublicKeys};
 use super::messages::STRUCT_END;
@@ -22,6 +23,9 @@ const MAX_HELLO_TAIL_LEN: usize = 1
     + size_of::<u32>()
     + DRS_TOKEN_AT
     + RESUME_TOKEN_LEN
+    + IDENTITY_MARKER.len()
+    + 1
+    + MAX_IDENTITY_LEN
     + MAX_HELLO_PAD_LEN
     + CRYPTO_SIGN_BYTES;
 
@@ -51,12 +55,15 @@ impl ClientChannel {
     }
 
     /// The hello frame that opens a session, sealed to the pool's box key; a version 3
-    /// hello carries the DRS extension and the resume token of the session it continues.
+    /// hello carries the DRS extension and the resume token of the session it continues,
+    /// and `identity`, when given, the identity extension naming the gateway's payout
+    /// address (at most `MAX_IDENTITY_LEN` bytes; a longer one is left out).
     pub fn hello(
         &mut self,
         pool_box_pk: &BoxPublicKey,
         user_agent: &str,
         protocol_version: ProtocolVersion,
+        identity: Option<&str>,
     ) -> Vec<u8> {
         let mut body =
             Vec::with_capacity(2 * PUBLIC_KEYS_LEN + user_agent.len() + MAX_HELLO_TAIL_LEN);
@@ -75,6 +82,11 @@ impl ClientChannel {
                 }
                 None => body.put_u8(0),
             }
+        }
+        if let Some(identity) = identity.filter(|i| !i.is_empty() && i.len() <= MAX_IDENTITY_LEN) {
+            body.put_slice(&IDENTITY_MARKER);
+            body.put_u8(identity.len() as u8);
+            body.put_slice(identity.as_bytes());
         }
         let r = crate::rand::bytes::<2>();
         let pad_len = 1 + usize::from(r[0]) % MAX_HELLO_PAD_LEN;
@@ -185,7 +197,7 @@ mod tests {
         let pool = KeyPairs::generate();
         let mut client = client_with_generated_keys(0x1122_3344);
 
-        let wire = client.hello(&pool.box_pk, "v0.4.1-beta/deadbeef", ProtocolVersion::V1);
+        let wire = client.hello(&pool.box_pk, "v0.4.1-beta/deadbeef", ProtocolVersion::V1, None);
         let hello = server_read_hello(&wire, &pool).expect("parse hello");
         assert_eq!(hello.user_agent, "v0.4.1-beta/deadbeef");
         assert_eq!(hello.nk, 0x1122_3344);
@@ -219,7 +231,7 @@ mod tests {
     fn a_long_motd_is_read_back_whole() {
         let pool = KeyPairs::generate();
         let mut client = client_with_generated_keys(9);
-        let wire = client.hello(&pool.box_pk, "ua", ProtocolVersion::V1);
+        let wire = client.hello(&pool.box_pk, "ua", ProtocolVersion::V1, None);
         let hello = server_read_hello(&wire, &pool).unwrap();
         let motd = "m".repeat(crate::datum::server::MAX_MOTD_LEN);
         let (response, _) = accept(hello, &pool, &motd).unwrap();
@@ -227,7 +239,7 @@ mod tests {
         assert_eq!(client.motd(), motd);
 
         let mut client = client_with_generated_keys(9);
-        let wire = client.hello(&pool.box_pk, "ua", ProtocolVersion::V1);
+        let wire = client.hello(&pool.box_pk, "ua", ProtocolVersion::V1, None);
         let hello = server_read_hello(&wire, &pool).unwrap();
         let (response, _) = accept(hello, &pool, "").unwrap();
         read_response(&mut client, &response, &pool.sign_pk).unwrap();
@@ -239,7 +251,7 @@ mod tests {
         let pool = KeyPairs::generate();
         let other = KeyPairs::generate();
         let mut client = client_with_generated_keys(1);
-        let wire = client.hello(&pool.box_pk, "ua", ProtocolVersion::V1);
+        let wire = client.hello(&pool.box_pk, "ua", ProtocolVersion::V1, None);
         let hello = server_read_hello(&wire, &pool).unwrap();
         let (response, _) = accept(hello, &pool, "hi").unwrap();
         assert!(matches!(
@@ -253,8 +265,8 @@ mod tests {
         let pool = KeyPairs::generate();
         let mut client = client_with_generated_keys(1);
         let mut other = client_with_generated_keys(1);
-        let _ = client.hello(&pool.box_pk, "ua", ProtocolVersion::V1);
-        let wire = other.hello(&pool.box_pk, "ua", ProtocolVersion::V1);
+        let _ = client.hello(&pool.box_pk, "ua", ProtocolVersion::V1, None);
+        let wire = other.hello(&pool.box_pk, "ua", ProtocolVersion::V1, None);
         let hello = server_read_hello(&wire, &pool).unwrap();
         let (response, _) = accept(hello, &pool, "hi").unwrap();
         assert!(matches!(read_response(&mut client, &response, &pool.sign_pk), Err(Error::Unseal)));
@@ -269,7 +281,7 @@ mod tests {
     fn a_truncated_response_is_refused_rather_than_panicking() {
         let pool = KeyPairs::generate();
         let mut client = client_with_generated_keys(1);
-        let wire = client.hello(&pool.box_pk, "ua", ProtocolVersion::V1);
+        let wire = client.hello(&pool.box_pk, "ua", ProtocolVersion::V1, None);
         let hello = server_read_hello(&wire, &pool).unwrap();
         let (response, _) = accept(hello, &pool, "hi").unwrap();
         let header = client.unmask_header(response[..framing::HEADER_LEN].try_into().unwrap());
@@ -297,7 +309,7 @@ mod tests {
         use crate::datum::channel::seal;
         let pool = KeyPairs::generate();
         let mut client = client_with_generated_keys(1);
-        let _ = client.hello(&pool.box_pk, "ua", ProtocolVersion::V1);
+        let _ = client.hello(&pool.box_pk, "ua", ProtocolVersion::V1, None);
         let header = FrameHeader {
             is_signed: true,
             is_encrypted_pubkey: true,
@@ -334,7 +346,7 @@ mod tests {
     fn a_frame_neither_channel_encrypted_nor_sealed_is_refused_after_the_handshake() {
         let pool = KeyPairs::generate();
         let mut client = client_with_generated_keys(9);
-        let wire = client.hello(&pool.box_pk, "ua", ProtocolVersion::V1);
+        let wire = client.hello(&pool.box_pk, "ua", ProtocolVersion::V1, None);
         let hello = server_read_hello(&wire, &pool).unwrap();
         let (response, mut session) = accept(hello, &pool, "hi").unwrap();
         read_response(&mut client, &response, &pool.sign_pk).unwrap();
@@ -374,7 +386,7 @@ mod tests {
     fn the_channel_desynchronizes_if_a_frame_is_skipped() {
         let pool = KeyPairs::generate();
         let mut client = client_with_generated_keys(7);
-        let wire = client.hello(&pool.box_pk, "ua", ProtocolVersion::V1);
+        let wire = client.hello(&pool.box_pk, "ua", ProtocolVersion::V1, None);
         let hello = server_read_hello(&wire, &pool).unwrap();
         let (response, mut session) = accept(hello, &pool, "hi").unwrap();
         read_response(&mut client, &response, &pool.sign_pk).unwrap();

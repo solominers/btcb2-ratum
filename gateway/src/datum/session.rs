@@ -119,7 +119,13 @@ impl<'a> Session<'a> {
         } else {
             ProtocolVersion::V1
         };
-        let hello = channel.hello(&pool_pubkey.box_pk, &user_agent(), protocol_version);
+        // The gateway's own payout address is the ticket the pool pays the finder's cut to.
+        let hello = channel.hello(
+            &pool_pubkey.box_pk,
+            &user_agent(),
+            protocol_version,
+            Some(&config.mining.pool_address),
+        );
         socket.write_all(&hello, WRITE_TIMEOUT)?;
 
         let (header, body) = framing::read_frame(

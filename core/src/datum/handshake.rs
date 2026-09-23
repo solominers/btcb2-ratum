@@ -5,6 +5,13 @@ pub(crate) const DRS_MARKER: [u8; 4] = *b"DRS\x01";
 pub(crate) const DRS_RESUME_PRESENT: u8 = 1;
 pub(crate) const DRS_FLAG_AT: usize = DRS_MARKER.len();
 pub(crate) const DRS_TOKEN_AT: usize = DRS_FLAG_AT + 1;
+/// The identity extension this gateway adds after the DRS extension (or after the nk on a
+/// version 1 hello): the marker, one length byte, and the payout address the gateway is a
+/// ticket for, which the pool pays the finder's cut of every split dictated to the
+/// connection. A pool that does not know the extension ignores it as padding, and a pool
+/// reading it ignores a hello without it.
+pub(crate) const IDENTITY_MARKER: [u8; 4] = *b"IDN\x01";
+pub(crate) const MAX_IDENTITY_LEN: usize = 128;
 
 pub const RESUME_TOKEN_LEN: usize = 40;
 pub type ResumeToken = [u8; RESUME_TOKEN_LEN];

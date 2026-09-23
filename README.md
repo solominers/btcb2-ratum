@@ -38,6 +38,16 @@ ignored. `RUST_LOG` overrides `logger.log_level_console`.
 
 ### Differences from the C gateway
 
+- The hello names the gateway's `mining.pool_address` to the pool in an identity extension
+  after the DRS extension (marker `IDN\x01`, a length byte, the address), which a pool that
+  does not know it ignores as padding. This pool pays the finder's cut of every split it
+  dictates to the connection to that address (see "The split" under Prime); a C gateway,
+  which sends none, is paid at the identity of the first share credited on its connection.
+- A share the pool refuses with `HashLimit` (45), a miner's address over the pool's hashrate
+  limit and banned, is logged at `warn` with what to do, sent to every connected miner as
+  `client.show_message` (which a miner that supports the method displays), and reported by
+  the API as `pool_ban_notice`; the notice repeats every 10 minutes while the refusals go on.
+
 - SIGUSR1 is a block notification, as in C (`blocknotify=kill -USR1 <pid>`); `/NOTIFY` on
   the API port does the same over HTTP. Unix only. A notification is followed by
   `getbestblockhash` reads, every 250 ms for up to 4 s, and one template request once the
@@ -480,9 +490,11 @@ their own outputs; the finder's cut, `--finder-bps` of what the fees leave (8000
 default; live), to the identity of the connection the split was dictated to; and the rest to
 the miners of every gateway in proportion to their weight in the window, the finder's own
 window share included (paid in one output with its cut). A connection's identity is the
-identity of the first share credited on it, named in the log; a split dictated before that
+address its hello names in the identity extension `ratum-gateway` sends (its
+`mining.pool_address`, when that is an address of the chain), else the identity of the first
+share credited on it; either is named in the log. A split dictated to a C gateway before its
 first share carries no finder's cut, and a gateway carrying several usernames pays its cut to
-that first one, whichever of them found the block. Each identity (one payout address) is one
+its one identity, whichever of them found the block. Each identity (one payout address) is one
 ticket: the finder's cut is what a ticket wins, and the window is what every ticket earns.
 
 A miner's identity is its stratum username up to the first `.`,

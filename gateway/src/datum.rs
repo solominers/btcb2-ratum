@@ -128,7 +128,23 @@ pub struct PoolState {
     queue_capacity: usize,
     /// Shares not queued because the queue was full.
     queue_full: Mutex<RepeatedEvent>,
+    /// The pool's last refusal of a share for the hashrate limit (`HashLimit`): when, and
+    /// the notice given to the miners.
+    ban_notice: Mutex<Option<BanNotice>>,
 }
+
+/// The pool refusing this gateway's shares because a miner's address is over its hashrate
+/// limit and banned.
+#[derive(Clone, Debug)]
+pub struct BanNotice {
+    pub at: std::time::Instant,
+    pub unix_at: u64,
+    pub message: String,
+}
+
+/// How often the miners are told again while the pool keeps refusing.
+const BAN_NOTICE_REPEAT: std::time::Duration =
+    std::time::Duration::from_secs(10 * ratum::SECS_PER_MINUTE);
 
 impl PoolState {
     pub fn new(queue_capacity: usize) -> Self {
@@ -138,7 +154,30 @@ impl PoolState {
             queue: Mutex::new(VecDeque::new()),
             queue_capacity: queue_capacity.max(MIN_QUEUE_CAPACITY),
             queue_full: Mutex::new(RepeatedEvent::default()),
+            ban_notice: Mutex::new(None),
         }
+    }
+
+    /// Records a `HashLimit` refusal; true when the miners should be told now (the first
+    /// refusal, and once per `BAN_NOTICE_REPEAT` while they go on).
+    pub fn note_hash_limit(&self, message: &str) -> bool {
+        let mut notice = lock(&self.ban_notice);
+        let now = std::time::Instant::now();
+        let tell = notice.as_ref().is_none_or(|n| now.duration_since(n.at) >= BAN_NOTICE_REPEAT);
+        if tell {
+            *notice = Some(BanNotice {
+                at: now,
+                unix_at: ratum::unix_now(),
+                message: message.to_string(),
+            });
+        }
+        tell
+    }
+
+    /// The last `HashLimit` refusal, if the pool refused a share for it within
+    /// `BAN_NOTICE_REPEAT`.
+    pub fn ban_notice(&self) -> Option<BanNotice> {
+        lock(&self.ban_notice).clone().filter(|n| n.at.elapsed() < BAN_NOTICE_REPEAT)
     }
 
     fn session(&self) -> MutexGuard<'_, SessionView> {
