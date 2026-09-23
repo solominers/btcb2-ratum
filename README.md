@@ -489,7 +489,9 @@ One ledger serves every gateway. A block's value goes, in this order: the operat
 their own outputs; the finder's cut, `--finder-bps` of what the fees leave (8000, 80%, by
 default; live), to the identity of the connection the split was dictated to; and the rest to
 the miners of every gateway in proportion to their weight in the window, the finder's own
-window share included (paid in one output with its cut). A connection's identity is the
+window share included (paid in one output with its cut). A window that pays nobody (empty,
+or every amount under the minimum) leaves its part to the finder too, so nothing of a
+block goes to the pool's script beyond the fees and rounding. A connection's identity is the
 address its hello names in the identity extension `ratum-gateway` sends (its
 `mining.pool_address`, when that is an address of the chain), else the identity of the first
 share credited on it; either is named in the log. A connection whose identity is not yet

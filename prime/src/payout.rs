@@ -103,7 +103,12 @@ fn outputs_of(plan: Plan, chain: Option<rpc::Chain>) -> (Vec<DictatedOutput>, Ve
     let reserved = fees.len() + usize::from(finder.is_some());
     let room = MAX_COINBASER_OUTPUTS.saturating_sub(reserved);
     let Split { mut payouts, carry_deltas } = weights.split_at_most(window_value, room);
-    if let Some((identity, script_pubkey, sats)) = finder {
+    if let Some((identity, script_pubkey, mut sats)) = finder {
+        // A window that pays nobody (empty, or every amount under the minimum) leaves its
+        // part to the finder rather than to the pool's script.
+        if payouts.is_empty() {
+            sats += window_value;
+        }
         match payouts.iter_mut().find(|p| p.identity == identity) {
             Some(p) => p.sats += sats,
             None => fees.push(DictatedOutput { payout: Payout { identity, sats }, script_pubkey }),
@@ -295,6 +300,23 @@ mod tests {
         let (outputs, _, _) = dictate(&server, PEER, 1_000_000, 3, Some(CAROL));
         assert_eq!(outputs.len(), 3, "the cut to carol and the window");
         assert!(carry.is_empty());
+    }
+
+    #[test]
+    fn an_empty_window_leaves_its_part_to_the_finder() {
+        let server = server_with_fee(&[], 100);
+        lock(&server.ledger).set_finder_bps(8_000);
+        let outputs = dictated_outputs(&server, 1_000_000, Some(CAROL));
+        assert_eq!(
+            values(&outputs),
+            vec![(10_000, p2wpkh(0xc3)), (990_000, p2wpkh(0xd4))],
+            "the fee, then everything else to the finder"
+        );
+        assert_eq!(
+            values(&dictated_outputs(&server, 1_000_000, None)),
+            vec![(10_000, p2wpkh(0xc3))],
+            "no finder known: the fee alone; `dictate` withholds even that on a live connection"
+        );
     }
 
     #[test]
