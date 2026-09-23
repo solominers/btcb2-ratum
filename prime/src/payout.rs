@@ -1,7 +1,7 @@
 //! The split as outputs: each identity's address decoded to the script that pays it, the ones no
 //! address decodes left with the pool, and the coinbaser response carrying the rest.
 
-use crate::ledger::split::Payout;
+use crate::ledger::split::{Payout, SplitPolicy, Weights};
 use crate::server::Server;
 use log::{info, warn};
 use ratum::bitcoin::address;
@@ -12,6 +12,7 @@ use ratum::datum::messages::coinbaser::{
 };
 use ratum::{lock, rpc};
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 const COINBASE_VALUE_TOLERANCE: f64 = 2.0;
 
@@ -58,12 +59,42 @@ pub fn unpayable_reason(chain: Option<rpc::Chain>) -> String {
     }
 }
 
-/// The split of `value` (`Weights::split`) as outputs. The ledger lock is held only to copy
-/// the window's weights (`Ledger::weights_for`): the sort, the amounts and the address
-/// decoding run without it.
+/// The outputs dictated for `value`: the operator fee outputs first, then the split of the
+/// rest (`Weights::split`). The ledger lock is held only to copy the fees and the window's
+/// weights (`Ledger::weights_for`): the sort, the amounts and the address decoding run
+/// without it.
 pub fn dictated_outputs(server: &Server, value: u64) -> Vec<DictatedOutput> {
-    let (weights, value) = lock(&server.ledger).weights_for(value);
-    outputs_for(weights.split(value), server.share_policy.chain)
+    let (fees, weights, miners_value) = {
+        let l = lock(&server.ledger);
+        let (weights, miners_value) = l.weights_for(value);
+        (fee_outputs(l.split_policy(), value), weights, miners_value)
+    };
+    with_fees(fees, weights, miners_value, server.share_policy.chain)
+}
+
+/// The fee outputs of `policy` on `value`, each `FeeOutput::bps` of it; a fee that rounds to
+/// nothing dictates no output.
+fn fee_outputs(policy: &SplitPolicy, value: u64) -> Vec<DictatedOutput> {
+    policy
+        .fee_amounts(value)
+        .filter(|(_, sats)| *sats != 0)
+        .map(|(fee, sats)| DictatedOutput {
+            payout: Payout { identity: Arc::from(fee.address.as_str()), sats },
+            script_pubkey: fee.script_pubkey.clone(),
+        })
+        .collect()
+}
+
+/// `fees` followed by the split of `miners_value` among the output slots the fees leave.
+fn with_fees(
+    mut fees: Vec<DictatedOutput>,
+    weights: Weights,
+    miners_value: u64,
+    chain: Option<rpc::Chain>,
+) -> Vec<DictatedOutput> {
+    let room = MAX_COINBASER_OUTPUTS.saturating_sub(fees.len());
+    fees.extend(outputs_for(weights.split_at_most(miners_value, room), chain));
+    fees
 }
 
 /// The split as outputs to the identities `address_script` gives a script for; the others are
@@ -108,17 +139,19 @@ pub fn dictate(
     value: u64,
     coinbaser_id: u8,
 ) -> (Vec<DictatedOutput>, Vec<u8>) {
-    let (weights, miners_value, window_shares, window_work) = {
+    let (fees, weights, miners_value, window_shares, window_work) = {
         let l = lock(&server.ledger);
         let (weights, miners_value) = l.weights_for(value);
-        (weights, miners_value, l.len(), l.total_work())
+        (fee_outputs(l.split_policy(), value), weights, miners_value, l.len(), l.total_work())
     };
-    let dictated = outputs_for(weights.split(miners_value), server.share_policy.chain);
-    let paid: u64 = dictated.iter().map(|d| d.payout.sats).sum();
+    let fee_outputs = fees.len();
+    let fee_sats: u64 = fees.iter().map(|d| d.payout.sats).sum();
+    let dictated = with_fees(fees, weights, miners_value, server.share_policy.chain);
+    let paid: u64 = dictated.iter().map(|d| d.payout.sats).sum::<u64>() - fee_sats;
     info!(
         "[{peer}]      paying {} miners {paid} of {value} sats from a window of {window_shares} \
-         shares ({window_work} work)",
-        dictated.len(),
+         shares ({window_work} work), {fee_sats} sats to {fee_outputs} fee output(s)",
+        dictated.len() - fee_outputs,
     );
     let outputs = dictated.iter().map(DictatedOutput::output).collect();
     let payload = CoinbaserResponse { value, coinbaser_id, outputs }
@@ -131,9 +164,10 @@ pub fn dictate(
 mod tests {
     use super::*;
     use crate::fixtures::{
-        ALICE, BOB, POOL, server_with, server_with_fee, server_with_public_gateway_fee,
+        ALICE, BOB, FEE_ADDRESS, POOL, regtest_p2wpkh_address, server_with, server_with_fee,
+        server_with_fees, server_with_public_gateway_fee,
     };
-    use crate::ledger::split::SplitPolicy;
+    use crate::ledger::split::FeeOutput;
     use ratum::fixtures::p2wpkh;
 
     const MAIN_ADDRESS: &str = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
@@ -174,29 +208,52 @@ mod tests {
     }
 
     #[test]
-    fn a_fee_is_deducted_before_the_split_and_left_to_the_pool() {
+    fn a_fee_is_dictated_as_its_own_output_ahead_of_the_split() {
         let server = server_with_fee(&[(ALICE, 3), (BOB, 1)], 100);
         let outputs = coinbaser_outputs(&server, 1_000_000);
         assert_eq!(
             outputs.iter().map(|o| (o.value, o.script_pubkey.clone())).collect::<Vec<_>>(),
-            vec![(742_500, p2wpkh(0xa1)), (247_500, p2wpkh(0xb2))]
+            vec![(10_000, p2wpkh(0xc3)), (742_500, p2wpkh(0xa1)), (247_500, p2wpkh(0xb2))]
         );
-        let paid: u64 = outputs.iter().map(|o| o.value).sum();
-        assert_eq!(paid, 990_000);
-        assert_eq!(1_000_000 - paid, 10_000);
+        assert_eq!(outputs.iter().map(|o| o.value).sum::<u64>(), 1_000_000, "nothing is left");
         assert!(outputs.iter().all(|o| o.script_pubkey != POOL));
     }
 
-    fn with_bps(fee_bps: u16) -> SplitPolicy {
-        SplitPolicy { fee_bps, ..SplitPolicy::default() }
+    #[test]
+    fn several_fees_are_each_taken_on_the_whole_value_and_one_under_the_minimum_is_not_taken() {
+        let server = server_with_fees(&[(ALICE, 1)], &[(FEE_ADDRESS, 25), (BOB, 50)]);
+        let outputs = coinbaser_outputs(&server, 1_000_000);
+        assert_eq!(
+            outputs.iter().map(|o| (o.value, o.script_pubkey.clone())).collect::<Vec<_>>(),
+            vec![(2_500, p2wpkh(0xc3)), (5_000, p2wpkh(0xb2)), (992_500, p2wpkh(0xa1))]
+        );
+        let outputs = coinbaser_outputs(&server, 100_000);
+        assert_eq!(outputs.len(), 1, "250 and 500 sats are under the minimum output: no fee");
+        assert_eq!(outputs[0].value, 100_000, "and the miners keep it");
+    }
+
+    fn with_bps(bps: u16) -> SplitPolicy {
+        let fee = FeeOutput { address: FEE_ADDRESS.into(), script_pubkey: p2wpkh(0xc3), bps };
+        SplitPolicy { fees: vec![fee], ..SplitPolicy::default() }
     }
 
     #[test]
     fn the_fee_is_rounded_down_so_the_operator_never_over_takes() {
-        assert_eq!(with_bps(0).fee_on(1_000_000), 0, "no fee by default");
+        assert_eq!(SplitPolicy::default().fee_on(1_000_000), 0, "no fee by default");
         assert_eq!(with_bps(50).fee_on(1_000_000), 5_000, "0.5%");
         assert_eq!(with_bps(100).fee_on(1_000_000), 10_000);
         assert_eq!(with_bps(100).fee_on(1), 0);
+        assert_eq!(with_bps(100).fee_bps(), 100);
+    }
+
+    #[test]
+    fn the_fee_outputs_count_against_the_output_limit() {
+        let miners: Vec<(String, u64)> =
+            (0..600u16).map(|i| (regtest_p2wpkh_address(&i.to_be_bytes()), 1)).collect();
+        let refs: Vec<(&str, u64)> = miners.iter().map(|(a, w)| (a.as_str(), *w)).collect();
+        let server = server_with_fees(&refs, &[(FEE_ADDRESS, 25), (BOB, 50)]);
+        let outputs = coinbaser_outputs(&server, 100_000_000_000);
+        assert_eq!(outputs.len(), MAX_COINBASER_OUTPUTS, "2 fee outputs and 510 miners");
     }
 
     #[test]

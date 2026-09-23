@@ -237,17 +237,19 @@ fn the_network_difficulty_sizes_the_window() {
 
 #[test]
 fn the_split_takes_the_operator_fee_and_the_minimum_from_the_policy() {
-    let policy = SplitPolicy { fee_bps: 100, public_gateway: None };
-    let mut l = Ledger::new(WindowRule::fixed(u128::MAX), policy);
+    let mut l = fixed(u128::MAX);
+    l.set_fees(crate::fixtures::fee_outputs(&[(crate::fixtures::FEE_ADDRESS, 1_000)]));
     for (i, (identity, difficulty)) in [("a", 99u64), ("b", 1)].into_iter().enumerate() {
         l.record(share(i as u64, identity, difficulty, hash(i as u64), "")).unwrap();
     }
-    assert_eq!(l.split_policy().fee_on(50_000), 500);
+    assert_eq!(l.split_policy().fee_on(50_000), 5_000);
     assert_eq!(
         l.split(50_000),
-        vec![payout("a", 49_500)],
-        "the 49_500 after the fee is split, and b's 495 of it is under the minimum"
+        vec![payout("a", 45_000)],
+        "the 45_000 after the fee is split, and b's 450 of it is under the minimum"
     );
+    assert_eq!(l.split_policy().fee_on(5_000), 0, "a 500 sat fee is under the minimum output");
+    assert_eq!(l.split_policy().miners_share(5_000), 5_000);
 }
 
 fn open_file(

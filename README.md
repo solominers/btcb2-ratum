@@ -299,7 +299,8 @@ min-diff = 16384                          # smallest share difficulty credited, 
 | `--min-diff <n>` | 16384 | the smallest share difficulty credited, a power of two |
 | `--window <multiple>` | 8 | the window's work as a multiple of the network difficulty |
 | `--ledger-keep-shares <n>` | keep all | the shares retained on disk (see "Ledger and window") |
-| `--fee-bps <n>` | 0 | the operator fee, at most 100 |
+| `--fee <address>=<bps>,...` | none | the operator fees, each an output of the coinbase; live (see "Live settings") |
+| `--watch-config <bool>` | true | re-read the settings file when it changes (see "Live settings") |
 | `--public-gateway-tag <text>` | none | the public gateway's secondary coinbase tag |
 | `--public-gateway-fee-bps <n>` | 0 | the fee on public-gateway work, at most 10000 |
 | `--public-gateway-fee-subsidy-bps <n>` | 0 | the portion of that fee reassigned to own-gateway miners |
@@ -487,8 +488,14 @@ window that is not such an address when the split is built (a share an earlier v
 pool credited) is dropped after the amounts are computed, so its amount stays in the coinbase
 value that reaches the pool's payout script as the remainder.
 
-`--fee-bps` (0 to 100, default 0) is deducted from the coinbase before the split and paid to
-the pool's payout script as the remainder.
+`--fee` names the operator fees: up to 4 entries of `<address>=<bps>` (basis points, 25 for
+0.25%) or `<address>=<percent>%`, comma-separated on the command line and a list in the file
+(`fee = ["bc1q...=25", "bc1q...=0.5%"]`), at most 1000 basis points (10%) together. Each is
+its own output dictated ahead of the split, computed on the whole coinbase value and rounded
+down, so the fees reach their addresses in the coinbase itself and never pass through the
+pool's payout script; the miners' split is what is left. A fee whose amount would fall under
+546 sats is not taken. The fee outputs count against the 512 outputs a split may carry. The
+fees are live settings: a change applies to the next split dictated, without a restart.
 
 A split pays each identity its part of the value it was dictated for, so a share whose job
 names a split dictated for another previous block, or for a value other than the job's
@@ -573,6 +580,35 @@ five minutes while running, so run the pool until the block's confirmations are 
 accepted the block, not that it stayed in the chain, and nothing else in the pool re-read
 that.
 
+### Live settings
+
+The settings named live in the table under "Configuration" (`fee`) apply while the pool runs;
+every other setting applies at a restart. The pool reads them from its settings file
+(`--config`, or `ratum.toml` in `--data-dir`) again:
+
+- when the file changes, looked at every 2 seconds and read once a change is a second old
+  (`--watch-config false` turns this off);
+- on `ratum-prime --reload` with the pool's `--data-dir`, which the running pool executes
+  over its control socket like the ledger commands;
+- on `ratum-prime --set <setting>=<value>`, which writes the setting to the file, keeping
+  the file's comments and order, and then reloads. A value is TOML; a bare word is taken as
+  a string, and for a list setting a comma-separated list of strings, so
+  `--set fee=bc1q...=25,bc1q...=0.5%` and `--set 'fee=["bc1q...=25"]'` write the same list.
+  `--set fee=` (an empty value) removes the setting, which returns it to its default. A
+  setting that is not live is written too and applies at the next restart. The value is
+  checked before the file is written, so a bad one changes nothing.
+
+Each reading installs the live settings, prints (and logs at `info`) what changed, and names
+the settings that changed in the file since the pool started but apply only at a restart. A
+file that does not parse, or names a fee the pool cannot pay, is refused and leaves the
+settings as they were. `ratum-prime --show-settings` prints the live settings the pool holds.
+A pool started without `--config` or `--data-dir` has no settings file and refuses the three
+commands. `/stats.json` reports the fees under `pool.fees`.
+
+A fee change reaches a gateway with the next split it requests, one per template (every
+`bitcoind.work_update_seconds`, 40 by default, and on each new block); a block found on a job
+built before that pays the fees dictated for it.
+
 ### Ledger commands
 
 The ledger commands run instead of the pool and take the same `--data-dir` (or `--config`
@@ -587,6 +623,9 @@ naming a file that sets it):
 | `--dump-ledger` | prints every stored share, one per line: time, difficulty, identity, hash, secondary tag |
 | `--snapshot <path>` | writes a copy of the ledger file to `<path>` |
 | `--offline` | with any of the above: opens the ledger file directly instead of asking the pool |
+| `--reload` | re-reads the settings file and applies the live settings (see "Live settings") |
+| `--set <setting>=<value> ...` | writes each setting to the settings file, then reloads |
+| `--show-settings` | prints the live settings the pool holds |
 
 A pool started with `--data-dir` listens on a Unix domain socket at `<data-dir>/control.sock`
 (mode 0600; never a TCP port, and not the stats interface). A command first connects to that

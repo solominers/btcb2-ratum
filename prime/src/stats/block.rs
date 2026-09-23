@@ -181,7 +181,7 @@ mod tests {
 
     /// A pool with an empty window on the `FakeNode` at `url`.
     fn stats_on(node: &FakeNode) -> Stats {
-        stats(server(ledger_with(&[], 0), BlockRecords::default(), &node.url()))
+        stats(server(ledger_with(&[], &[]), BlockRecords::default(), &node.url()))
     }
 
     fn request(url: &str) -> Request {

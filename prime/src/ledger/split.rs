@@ -27,17 +27,53 @@ pub struct PublicGateway {
 /// under it leaves the split.
 pub const MIN_PAYOUT: u64 = 546;
 
-/// What a block's value is split by: the operator fee paid to the pool's script before the
-/// split, and the public gateway fee charged on the window's weights.
+/// The operator fee outputs a split may carry.
+pub const MAX_FEE_OUTPUTS: usize = 4;
+/// The most the fee outputs may take together, in basis points: 10%.
+pub const MAX_TOTAL_FEE_BPS: u16 = 1000;
+
+/// One operator fee: the address paid, its script, and the basis points of the coinbase value
+/// it takes. The fees are dictated as outputs ahead of the miners' split, so they reach their
+/// addresses in the coinbase itself and never pass through the pool's payout script.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FeeOutput {
+    pub address: String,
+    pub script_pubkey: Vec<u8>,
+    pub bps: u16,
+}
+
+/// What a block's value is split by: the operator fees taken off the top as their own
+/// outputs, and the public gateway fee charged on the window's weights. The fees change while
+/// the pool runs (`Ledger::set_fees`); the public gateway is fixed at startup, since the
+/// window credits own-gateway work by its tag as each share is recorded.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SplitPolicy {
-    pub fee_bps: u16,
+    pub fees: Vec<FeeOutput>,
     pub public_gateway: Option<PublicGateway>,
 }
 
 impl SplitPolicy {
+    /// The basis points every fee output takes together.
+    pub fn fee_bps(&self) -> u16 {
+        self.fees.iter().map(|f| f.bps).sum()
+    }
+
+    /// Each fee output's amount of `value`, in the fees' order: `bps` of the value rounded
+    /// down, so the operator never over-takes, and 0 where that falls under `MIN_PAYOUT`,
+    /// since no output under it is written and the fee is then not taken. Each amount is
+    /// computed on the whole value, not on what the fees before it left, so the fees are
+    /// independent of their order.
+    pub fn fee_amounts(&self, value: u64) -> impl Iterator<Item = (&FeeOutput, u64)> {
+        self.fees.iter().map(move |f| {
+            let sats = basis_points_of(u128::from(value), f.bps) as u64;
+            (f, if sats >= MIN_PAYOUT { sats } else { 0 })
+        })
+    }
+
+    /// What the fee outputs take of `value` together; `miners_share` is the rest, so the two
+    /// total the value exactly.
     pub fn fee_on(&self, value: u64) -> u64 {
-        basis_points_of(u128::from(value), self.fee_bps) as u64
+        self.fee_amounts(value).map(|(_, sats)| sats).sum()
     }
 
     pub fn miners_share(&self, value: u64) -> u64 {
@@ -89,10 +125,16 @@ pub struct Weights {
 }
 
 impl Weights {
-    /// The split of `value`, already less the operator fee, among at most
+    /// The split of `value`, already less the operator fees, among at most
     /// `MAX_COINBASER_OUTPUTS` identities of at least `MIN_PAYOUT`, most work first.
     pub fn split(self, value: u64) -> Vec<Payout> {
         self.split_with(value, MIN_PAYOUT, MAX_COINBASER_OUTPUTS)
+    }
+
+    /// `split` among at most `max_outputs` identities: what is left of the output count once
+    /// the fee outputs dictated beside the split are counted.
+    pub fn split_at_most(self, value: u64, max_outputs: usize) -> Vec<Payout> {
+        self.split_with(value, MIN_PAYOUT, max_outputs)
     }
 
     fn split_with(self, value: u64, min_payout: u64, max_outputs: usize) -> Vec<Payout> {

@@ -9,6 +9,8 @@ use crate::control;
 use crate::ledger::blocks::{BlockRecords, ConfirmationReading, OwedBlock, Voided};
 use crate::ledger::split::Payout;
 use crate::ledger::{self, LedgerLocation, Share};
+use crate::live;
+use crate::server::Server;
 use redb::Database;
 use serde::{Deserialize, Serialize};
 use std::fmt::{self, Write as _};
@@ -37,6 +39,14 @@ pub enum Command {
     Snapshot {
         path: PathBuf,
     },
+    /// `--reload`: the live settings read from the settings file again.
+    Reload,
+    /// `--set SETTING=VALUE`, each: written to the settings file, then a reload.
+    Set {
+        assignments: Vec<String>,
+    },
+    /// `--show-settings`.
+    ShowSettings,
 }
 
 impl Command {
@@ -54,6 +64,15 @@ impl Command {
         if let Some(arg) = &o.record_owed {
             return Some(Self::RecordOwed { arg: arg.clone(), owed: o.owed.clone() });
         }
+        if o.reload {
+            return Some(Self::Reload);
+        }
+        if !o.set.is_empty() {
+            return Some(Self::Set { assignments: o.set.clone() });
+        }
+        if o.show_settings {
+            return Some(Self::ShowSettings);
+        }
         let path = o.snapshot.as_ref()?;
         let path = std::path::absolute(path).unwrap_or_else(|_| PathBuf::from(path));
         Some(Self::Snapshot { path })
@@ -66,6 +85,9 @@ impl Command {
             Self::RecordOwed { .. } => "--record-owed",
             Self::DumpLedger => "--dump-ledger",
             Self::Snapshot { .. } => "--snapshot",
+            Self::Reload => "--reload",
+            Self::Set { .. } => "--set",
+            Self::ShowSettings => "--show-settings",
         }
     }
 }
@@ -79,8 +101,9 @@ impl fmt::Display for Command {
                 write!(f, " {arg}")?;
                 owed.iter().try_for_each(|entry| write!(f, " --owed {entry}"))
             }
-            Self::DumpLedger => Ok(()),
+            Self::DumpLedger | Self::Reload | Self::ShowSettings => Ok(()),
             Self::Snapshot { path } => write!(f, " {}", path.display()),
+            Self::Set { assignments } => assignments.iter().try_for_each(|a| write!(f, " {a:?}")),
         }
     }
 }
@@ -124,6 +147,11 @@ pub trait LedgerAccess {
 
     /// The ledger file's database and path.
     fn database(&mut self) -> io::Result<(Arc<Database>, PathBuf)>;
+
+    /// The running pool, for the commands on its live settings; none on a ledger file.
+    fn server(&mut self) -> Option<&Server> {
+        None
+    }
 }
 
 /// The ledger file of a stopped pool: opened by each command, never created.
@@ -173,13 +201,34 @@ pub fn execute(
             )?;
             Ok(())
         }
+        Command::Reload | Command::Set { .. } | Command::ShowSettings => {
+            let Some(server) = access.server() else {
+                return Err(Failure::Usage(format!(
+                    "{} runs in the pool that owns the data directory, over its control \
+                     socket; no pool answers there",
+                    command.flag()
+                )));
+            };
+            let text = match command {
+                Command::Reload => live::reload(server),
+                Command::Set { assignments } => live::set(server, assignments),
+                _ => Ok(live::show(server)),
+            }
+            .map_err(Failure::Usage)?;
+            out.write_all(text.as_bytes())?;
+            Ok(())
+        }
         _ => {
             let mut text = String::new();
             let result = access.with_records(|records| match command {
                 Command::SettleBlock { arg } => settle_block(records, arg, now, &mut text),
                 Command::VoidBlock { arg } => void_block(records, arg, &mut text),
                 Command::RecordOwed { arg, owed } => record_owed(records, arg, owed, &mut text),
-                Command::DumpLedger | Command::Snapshot { .. } => unreachable!("matched above"),
+                Command::DumpLedger
+                | Command::Snapshot { .. }
+                | Command::Reload
+                | Command::Set { .. }
+                | Command::ShowSettings => unreachable!("matched above"),
             })?;
             out.write_all(text.as_bytes())?;
             result

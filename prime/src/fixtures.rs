@@ -3,7 +3,7 @@
 
 use crate::cli::Options;
 use crate::ledger::blocks::{BlockRecords, FoundBlock, OwedBlock};
-use crate::ledger::split::{Payout, PublicGateway, SplitPolicy};
+use crate::ledger::split::{FeeOutput, Payout, PublicGateway, SplitPolicy};
 use crate::ledger::{Ledger, Share, WindowRule};
 use crate::server::Server;
 use crate::settings::Resolved;
@@ -16,20 +16,49 @@ use ratum::rpc;
 pub const ALICE: &str = "bcrt1q5xs6rgdp5xs6rgdp5xs6rgdp5xs6rgdpa854mc";
 /// A regtest address whose script is `ratum::fixtures::p2wpkh(0xb2)`.
 pub const BOB: &str = "bcrt1qk2et9v4jk2et9v4jk2et9v4jk2et9v4jldyv0a";
+/// A regtest address whose script is `ratum::fixtures::p2wpkh(0xc3)`: where a test's operator
+/// fee goes.
+pub const FEE_ADDRESS: &str = "bcrt1qc0pu8s7rc0pu8s7rc0pu8s7rc0pu8s7rpz2hyw";
+
+/// A regtest P2WPKH address whose 20-byte program is `seed` repeated, so a test names as many
+/// distinct identities as it needs.
+pub fn regtest_p2wpkh_address(seed: &[u8]) -> String {
+    let program: Vec<u8> = seed.iter().copied().cycle().take(20).collect();
+    let hrp = bech32::Hrp::parse("bcrt").unwrap();
+    bech32::segwit::encode(hrp, bech32::segwit::VERSION_0, &program).unwrap()
+}
 
 /// A server on regtest whose window holds `shares`, each an identity and its difficulty.
 pub fn server_with(shares: &[(&str, u64)]) -> Server {
-    server_on(ledger_with(shares, 0), BlockRecords::default())
+    server_on(ledger_with(shares, &[]), BlockRecords::default())
 }
 
-/// `server_with` under an operator fee of `fee_bps`.
+/// `server_with` under an operator fee of `fee_bps` paid to `FEE_ADDRESS`.
 pub fn server_with_fee(shares: &[(&str, u64)], fee_bps: u16) -> Server {
-    server_on(ledger_with(shares, fee_bps), BlockRecords::default())
+    server_with_fees(shares, &[(FEE_ADDRESS, fee_bps)])
 }
 
-/// An unbounded window holding `shares`, each an identity and its difficulty.
-pub fn ledger_with(shares: &[(&str, u64)], fee_bps: u16) -> Ledger {
-    let policy = SplitPolicy { fee_bps, public_gateway: None };
+/// `server_with` under the operator `fees`, each a regtest address and its basis points.
+pub fn server_with_fees(shares: &[(&str, u64)], fees: &[(&str, u16)]) -> Server {
+    server_on(ledger_with(shares, fees), BlockRecords::default())
+}
+
+/// The fee outputs `fees` name, each a regtest address and its basis points.
+pub fn fee_outputs(fees: &[(&str, u16)]) -> Vec<FeeOutput> {
+    fees.iter()
+        .map(|(address, bps)| FeeOutput {
+            address: address.to_string(),
+            script_pubkey: crate::payout::address_script(address, Some(rpc::Chain::Regtest))
+                .unwrap_or_else(|| panic!("{address} is not a regtest address")),
+            bps: *bps,
+        })
+        .collect()
+}
+
+/// An unbounded window holding `shares`, each an identity and its difficulty, under the
+/// operator `fees`.
+pub fn ledger_with(shares: &[(&str, u64)], fees: &[(&str, u16)]) -> Ledger {
+    let policy = SplitPolicy { fees: fee_outputs(fees), public_gateway: None };
     let mut ledger = Ledger::new(WindowRule::fixed(u128::MAX), policy);
     for (i, (identity, difficulty)) in shares.iter().enumerate() {
         let mut hash = [0u8; 32];

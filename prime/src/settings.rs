@@ -1,9 +1,11 @@
 //! Turning the options into what each part reads: the server's own settings, the ledger's window
 //! rule and split policy, and the share policy a share is checked against.
 
-use crate::cli::Options;
+use crate::cli::{self, Options};
 use crate::ledger::WindowRule;
-use crate::ledger::split::{PublicGateway, SplitPolicy};
+use crate::ledger::split::{
+    FeeOutput, MAX_FEE_OUTPUTS, MAX_TOTAL_FEE_BPS, PublicGateway, SplitPolicy,
+};
 use crate::payout;
 use crate::verify::SharePolicy;
 use log::warn;
@@ -13,7 +15,6 @@ use std::fmt::Display;
 use std::path::PathBuf;
 use std::time::Duration;
 
-const MAX_FEE_BPS: u16 = 10000;
 const DEFAULT_POLL_SECS: f64 = 0.5;
 const DEFAULT_MIN_DIFFICULTY: u64 = 16384;
 const DEFAULT_MAX_CONNECTIONS: usize = 1024;
@@ -37,6 +38,13 @@ pub struct Settings {
     pub listen: String,
     pub stats_listen: Option<String>,
     pub data_dir: Option<PathBuf>,
+    /// The settings file, which the live settings are re-read from; none without `--config`
+    /// or `--data-dir`.
+    pub config_path: Option<PathBuf>,
+    /// What the settings file held at startup, before the command line was applied over
+    /// it: what a reload reports its changes against. `main` sets it from `cli::Loaded`.
+    pub file_options: Options,
+    pub watch_config: bool,
     pub motd: String,
     pub require_v3: bool,
     pub max_connections: usize,
@@ -57,6 +65,9 @@ pub fn resolve(o: &Options) -> Result<Resolved, String> {
         listen: o.listen.clone().unwrap_or_else(|| DEFAULT_LISTEN.to_string()),
         stats_listen: o.stats_listen.clone(),
         data_dir: o.data_dir.clone().map(PathBuf::from),
+        config_path: cli::config_path(o),
+        file_options: Options::default(),
+        watch_config: o.watch_config.unwrap_or(true),
         motd: o.motd.clone().unwrap_or_else(|| DEFAULT_MOTD.to_string()),
         require_v3: o.require_v3.unwrap_or(false),
         max_connections: valid_or(
@@ -90,20 +101,66 @@ pub fn resolve(o: &Options) -> Result<Resolved, String> {
             |n| n.is_finite() && *n > 0.0,
         )?,
     };
-    let split = SplitPolicy {
-        fee_bps: valid_or(
-            o.fee_bps,
-            0,
-            "--fee-bps",
-            &format!(
-                "basis points from 0 to {MAX_FEE_BPS} (a fee of at most {}%)",
-                f64::from(MAX_FEE_BPS) / 100.0
-            ),
-            |n| *n <= MAX_FEE_BPS,
-        )?,
-        public_gateway,
-    };
+    // The fees need the chain's address prefixes, which the node reports after the options
+    // resolve, so `fees` decodes them then and `Ledger::set_fees` installs them.
+    let split = SplitPolicy { fees: Vec::new(), public_gateway };
     Ok(Resolved { settings, window, split })
+}
+
+/// The operator fees `--fee` names, each an address of `chain` and its basis points: at most
+/// `MAX_FEE_OUTPUTS`, distinct addresses, each above 0 and at most `MAX_TOTAL_FEE_BPS`
+/// together. This is the one reading of the setting: startup and every reload use it.
+pub fn fees(o: &Options, chain: Option<rpc::Chain>) -> Result<Vec<FeeOutput>, String> {
+    let entries: Vec<&str> = o.fee.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+    if entries.len() > MAX_FEE_OUTPUTS {
+        return Err(format!(
+            "--fee names {} fees; at most {MAX_FEE_OUTPUTS} are dictated as outputs",
+            entries.len()
+        ));
+    }
+    let mut fees: Vec<FeeOutput> = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let Some((address, amount)) = entry.split_once('=') else {
+            return Err(format!(
+                "--fee entry {entry:?} must be ADDRESS=BPS (basis points, 25 for 0.25%) or \
+                 ADDRESS=PERCENT% (0.25%)"
+            ));
+        };
+        let (address, amount) = (address.trim(), amount.trim());
+        let bps = fee_bps(amount)
+            .ok_or_else(|| format!("--fee {address}: {amount:?} is not BPS or PERCENT%"))?;
+        if bps == 0 {
+            return Err(format!("--fee {address}: a fee of 0 takes nothing; leave it out"));
+        }
+        if fees.iter().any(|f| f.address == address) {
+            return Err(format!("--fee names {address} twice; give it one amount"));
+        }
+        let script_pubkey = payout::address_script(address, chain).ok_or_else(|| {
+            format!("--fee address {address:?} is {}", payout::unpayable_reason(chain))
+        })?;
+        fees.push(FeeOutput { address: address.to_string(), script_pubkey, bps });
+    }
+    let total: u32 = fees.iter().map(|f| u32::from(f.bps)).sum();
+    if total > u32::from(MAX_TOTAL_FEE_BPS) {
+        return Err(format!(
+            "--fee takes {total} basis points together; at most {MAX_TOTAL_FEE_BPS} ({}%)",
+            f64::from(MAX_TOTAL_FEE_BPS) / 100.0
+        ));
+    }
+    Ok(fees)
+}
+
+/// `amount` as basis points: an integer, or a percentage with a `%` rounded to the nearest
+/// basis point.
+fn fee_bps(amount: &str) -> Option<u16> {
+    if let Some(percent) = amount.strip_suffix('%') {
+        let p: f64 = percent.trim().parse().ok()?;
+        if !p.is_finite() || p < 0.0 {
+            return None;
+        }
+        return u16::try_from((p * 100.0).round() as u64).ok();
+    }
+    amount.parse().ok()
 }
 
 /// What a share is checked against on `chain`, the chain the node reported at startup (none
@@ -295,8 +352,10 @@ mod tests {
         let Resolved { settings, window, split } = resolve(&Options::default()).unwrap();
         assert_eq!(settings.listen, DEFAULT_LISTEN);
         assert_eq!(window, WindowRule { multiple: DEFAULT_WINDOW_MULTIPLE });
-        assert_eq!(split.fee_bps, 0);
+        assert!(split.fees.is_empty());
         assert!(split.public_gateway.is_none());
+        assert!(settings.watch_config, "the file is watched unless turned off");
+        assert_eq!(settings.config_path, None);
         let policy = policy(Options::default()).unwrap();
         assert_eq!(policy.config.min_difficulty, 16384);
         assert_eq!(policy.config.prime_id, PRIME_ID);
@@ -314,9 +373,43 @@ mod tests {
         assert_eq!(no_dir.hashrate_path(), None, "without a data directory nothing is written");
     }
 
+    fn fee_options(entries: &[&str]) -> Options {
+        Options { fee: entries.iter().map(|e| e.to_string()).collect(), ..Default::default() }
+    }
+
+    #[test]
+    fn the_fees_are_addresses_of_the_chain_with_basis_points_or_a_percentage() {
+        let regtest = Some(rpc::Chain::Regtest);
+        let parsed =
+            fees(&fee_options(&[&format!("{REGTEST_ADDRESS}=25"), " ", ""]), regtest).unwrap();
+        assert_eq!(parsed.len(), 1, "blank entries are skipped");
+        assert_eq!((parsed[0].address.as_str(), parsed[0].bps), (REGTEST_ADDRESS, 25));
+        assert_eq!(&parsed[0].script_pubkey[..2], &[0x00, 0x14]);
+        let percent = fees(&fee_options(&[&format!("{REGTEST_ADDRESS} = 0.25%")]), regtest);
+        assert_eq!(percent.unwrap()[0].bps, 25, "a percentage, with spaces around the =");
+        assert_eq!(fee_bps("1.5%"), Some(150));
+        assert_eq!(fee_bps("0.004%"), Some(0), "rounds to the nearest basis point");
+        assert_eq!(fee_bps("x"), None);
+        assert_eq!(fee_bps("-1%"), None);
+        assert!(fees(&Options::default(), regtest).unwrap().is_empty());
+
+        let refused = |entries: &[&str], what: &str| {
+            let e = fees(&fee_options(entries), regtest).unwrap_err();
+            assert!(e.contains(what), "{entries:?}: {e}");
+        };
+        refused(&[REGTEST_ADDRESS], "ADDRESS=BPS");
+        refused(&[&format!("{REGTEST_ADDRESS}=x")], "is not BPS or PERCENT%");
+        refused(&[&format!("{REGTEST_ADDRESS}=0")], "takes nothing");
+        refused(&[&format!("{MAIN_ADDRESS}=25")], "of chain regtest");
+        refused(&[&format!("{REGTEST_ADDRESS}=25"), &format!("{REGTEST_ADDRESS}=50")], "twice");
+        refused(&[&format!("{REGTEST_ADDRESS}=1001")], "at most 1000");
+        let five: Vec<String> = (0..5).map(|i| format!("{REGTEST_ADDRESS}={}", i + 1)).collect();
+        let five: Vec<&str> = five.iter().map(String::as_str).collect();
+        refused(&five, "at most 4");
+    }
+
     #[test]
     fn a_value_out_of_its_range_is_refused_with_its_flag() {
-        refused(Options { fee_bps: Some(MAX_FEE_BPS + 1), ..Default::default() }, "--fee-bps");
         refused(
             Options { public_gateway_fee_bps: Some(10_001), ..Default::default() },
             "--public-gateway-fee-bps",

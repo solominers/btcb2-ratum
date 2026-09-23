@@ -15,6 +15,7 @@ mod control;
 mod fixtures;
 mod keys;
 mod ledger;
+mod live;
 mod node;
 mod payout;
 mod relay;
@@ -159,10 +160,10 @@ fn raise_open_file_limit(max_connections: usize) {
 fn report_settings(s: &Settings, ledger: &Ledger) {
     let (window, split) = (ledger.window_rule(), ledger.split_policy());
     info!(
-        "payouts: window {}x network difficulty ({} at startup), operator fee {} bps",
+        "payouts: window {}x network difficulty ({} at startup), operator fee: {}",
         window.multiple,
         ledger.window(),
-        split.fee_bps
+        live::fees_text(&split.fees)
     );
     if let Some(gateway) = split.public_gateway.as_ref().filter(|g| g.fee_bps > 0) {
         info!(
@@ -182,11 +183,12 @@ fn report_settings(s: &Settings, ledger: &Ledger) {
 
 fn main() -> io::Result<()> {
     init_logging();
-    let options = cli::load();
+    let cli::Loaded { options, file, .. } = cli::load();
     info!("ratum-prime {}", VERSION);
 
-    let Resolved { settings: s, window, split } =
+    let Resolved { settings: mut s, window, split } =
         settings::resolve(&options).unwrap_or_else(|e| cli::fatal!("{e}"));
+    s.file_options = file;
     if let Some(dir) = &s.data_dir {
         std::fs::create_dir_all(dir)?;
     }
@@ -203,6 +205,7 @@ fn main() -> io::Result<()> {
     let chain = tip.map(|t| t.chain);
     let share = settings::share_policy(&options, chain).unwrap_or_else(|e| cli::fatal!("{e}"));
     info!("pool payout script: {}", hex::encode(&share.config.payout_script));
+    let fees = settings::fees(&options, chain).unwrap_or_else(|e| cli::fatal!("{e}"));
 
     // Bound before the ledger opens, so a second pool on the data directory is refused here,
     // naming this one; dropped when main returns, which removes the socket file. A socket
@@ -222,6 +225,7 @@ fn main() -> io::Result<()> {
     };
 
     let mut ledger = Ledger::new(window, split);
+    ledger.set_fees(fees);
     if let Some(t) = tip {
         ledger.set_network_difficulty(t.difficulty);
     }
@@ -239,6 +243,7 @@ fn main() -> io::Result<()> {
 
     watch_node_in_background(&server, chain);
     confirmations::watch(Arc::clone(&server));
+    live::watch(Arc::clone(&server));
     if let Some(control) = &mut control {
         control.serve(Arc::clone(&server));
     }

@@ -37,3 +37,5 @@ sha2 = "0.11"
 socket2 = "0.6"
 thiserror = "2.0.20"
 toml = "1.1.6"
+# Rewrites a settings file in place for `--set`, keeping its comments and order.
+toml_edit = "0.23"

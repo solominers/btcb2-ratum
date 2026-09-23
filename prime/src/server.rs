@@ -5,6 +5,7 @@ use crate::accounting::{ACCEPTED_HASH_RETENTION_SECS, AcceptedShareHashes, MAX_A
 use crate::bounded::BoundedSet;
 use crate::ledger::Ledger;
 use crate::ledger::blocks::BlockRecords;
+use crate::live;
 use crate::node::NodeState;
 use crate::sessions::SessionStore;
 use crate::settings::Settings;
@@ -44,6 +45,8 @@ pub struct Server {
     /// The hashes of the blocks most recently submitted to the node, so a share sent again,
     /// on any connection, is not submitted again.
     pub relayed_blocks: Mutex<BoundedSet<[u8; 32]>>,
+    /// What the live settings keep between readings of the settings file.
+    pub live: live::State,
 }
 
 impl Server {
@@ -76,6 +79,7 @@ impl Server {
             open_per_ip: Mutex::new(HashMap::new()),
             txn_cache: Mutex::new(TxnCache::default()),
             relayed_blocks: Mutex::new(BoundedSet::new(MAX_RELAYED_BLOCKS)),
+            live: live::State::default(),
         })
     }
 

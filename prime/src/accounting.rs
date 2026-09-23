@@ -289,17 +289,17 @@ fn record_owed_block(server: &Server, peer: SocketAddr, rebuilt: &RebuiltShare, 
 }
 
 /// A coinbase that left dictated outputs out owes them, each scaled down in proportion when
-/// they total more than the pool's payout script received beyond the operator fee.
+/// they total more than the pool's payout script received. The operator fees are dictated
+/// outputs of their own, so what the pool's script received is not theirs: a fee output the
+/// coinbase left out is among the unpaid ones and owed to its address like any other.
 fn record_unpaid_outputs(server: &Server, peer: SocketAddr, rebuilt: &RebuiltShare, now: u64) {
-    let value = rebuilt.paid_to_split.saturating_add(rebuilt.paid_to_pool);
-    let fee = lock(&server.ledger).split_policy().fee_on(value);
-    let available = rebuilt.paid_to_pool.saturating_sub(fee);
+    let available = rebuilt.paid_to_pool;
     let mut entries = rebuilt.unpaid_outputs.clone();
     let dictated: u64 = entries.iter().map(|p| p.sats).sum();
     if dictated > available {
         warn!(
             "[{peer}]   ** the coinbase left out {dictated} sats of dictated outputs but the \
-             pool's payout script received only {available} sats beyond the fee; the owed \
+             pool's payout script received only {available} sats; the owed \
              amounts are scaled down to what it received"
         );
         for p in &mut entries {
@@ -324,7 +324,8 @@ fn record_unpaid_outputs(server: &Server, peer: SocketAddr, rebuilt: &RebuiltSha
 mod tests {
     use super::*;
     use crate::fixtures::{
-        ALICE, BOB, payout, server_with, server_with_fee, server_with_public_gateway_fee,
+        ALICE, BOB, FEE_ADDRESS, payout, server_with, server_with_fee,
+        server_with_public_gateway_fee,
     };
 
     const PEER: SocketAddr =
@@ -434,35 +435,47 @@ mod tests {
         let owed = &records.owed()[0];
         assert_eq!((owed.height, owed.block_hash, owed.found_at), (961_866, [0xbb; 32], 42));
         assert_eq!(owed.settled_at, None);
-        assert_eq!(owed.entries, left_out, "80 sats of the 90 left after a 10 sat fee");
+        assert_eq!(owed.entries, left_out, "80 sats of the 100 the pool's script received");
     }
 
     #[test]
     fn left_out_outputs_over_what_the_pool_script_received_are_scaled_down() {
         let server = server_charging_a_fee();
         let left_out = vec![payout("alice", 60), payout("bob", 20)];
-        record_block(&server, PEER, "alice", &block(940, 60, left_out), 42);
+        record_block(&server, PEER, "alice", &block(950, 50, left_out), 42);
         assert_eq!(
             owed_entries(&server),
             [vec![payout("alice", 37), payout("bob", 12)]],
-            "80 sats scaled to the 50 left after the fee, rounded down"
+            "80 sats scaled to the 50 received, rounded down"
         );
     }
 
     #[test]
-    fn nothing_is_owed_when_the_pool_script_received_only_the_fee() {
+    fn a_left_out_fee_output_is_owed_to_the_fee_address() {
+        let server = server_charging_a_fee();
+        let left_out = vec![payout(FEE_ADDRESS, 10), payout("alice", 60)];
+        record_block(&server, PEER, "alice", &block(930, 70, left_out.clone()), 42);
+        assert_eq!(owed_entries(&server), [left_out], "the fee is owed like any output");
+    }
+
+    #[test]
+    fn nothing_is_owed_when_the_pool_script_received_nothing() {
         let server = server_charging_a_fee();
         let left_out = vec![payout("alice", 60), payout("bob", 20)];
-        record_block(&server, PEER, "alice", &block(990, 10, left_out), 42);
+        record_block(&server, PEER, "alice", &block(1000, 0, left_out), 42);
         assert_eq!(lock(&server.records).blocks().len(), 1);
         assert!(owed_entries(&server).is_empty(), "every amount scales to zero");
     }
 
     #[test]
-    fn a_block_paying_the_window_nothing_owes_the_split_minus_the_fee() {
+    fn a_block_paying_the_window_nothing_owes_the_fee_and_the_split() {
         let server = server_charging_a_fee();
         record_block(&server, PEER, "alice", &block(0, 1_000_000, Vec::new()), 42);
-        assert_eq!(owed_entries(&server), [vec![payout(ALICE, 742_500), payout(BOB, 247_500)]]);
+        assert_eq!(
+            owed_entries(&server),
+            [vec![payout(FEE_ADDRESS, 10_000), payout(ALICE, 742_500), payout(BOB, 247_500)]],
+            "the pool's script received the fee too, so it is owed to the fee address"
+        );
     }
 
     #[test]

@@ -253,6 +253,10 @@ mod unix {
                 .file()
                 .ok_or_else(|| io::Error::other("the pool holds its ledger in memory only"))
         }
+
+        fn server(&mut self) -> Option<&Server> {
+            Some(self.0)
+        }
     }
 
     /// Reads the request, runs it and writes the replies. `refusal` set answers that alone.

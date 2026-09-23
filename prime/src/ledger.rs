@@ -339,6 +339,13 @@ impl Ledger {
         &self.split_policy
     }
 
+    /// Replaces the operator fees, which the next dictated split carries. Only the fees
+    /// change while the pool runs: the public gateway is what the window credited each share
+    /// against, so it stays.
+    pub fn set_fees(&mut self, fees: Vec<split::FeeOutput>) {
+        self.split_policy.fees = fees;
+    }
+
     fn is_own_gateway_share(&self, share: &Share) -> bool {
         let public = self.split_policy.public_gateway.as_ref();
         public.is_some_and(|public| share.tag_secondary != public.tag)
