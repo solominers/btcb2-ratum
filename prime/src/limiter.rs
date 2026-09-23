@@ -123,7 +123,7 @@ pub fn parse_bracket(text: &str) -> Result<Bracket, String> {
     }
     let threshold_hs = parse_hashrate(rate.trim())
         .ok_or_else(|| format!("{text:?}: {rate:?} is not a hashrate like 3.5T or 100T"))?;
-    if !(threshold_hs > 0.0) {
+    if threshold_hs <= 0.0 || threshold_hs.is_nan() {
         return Err(format!("{text:?}: the rate must be above 0"));
     }
     Ok(Bracket { period_secs, threshold_hs })
@@ -195,11 +195,11 @@ pub fn parse_hashrate(text: &str) -> Option<f64> {
 }
 
 pub fn period_text(secs: u64) -> String {
-    if secs % ratum::SECS_PER_DAY == 0 {
+    if secs.is_multiple_of(ratum::SECS_PER_DAY) {
         format!("{}d", secs / ratum::SECS_PER_DAY)
-    } else if secs % ratum::SECS_PER_HOUR == 0 {
+    } else if secs.is_multiple_of(ratum::SECS_PER_HOUR) {
         format!("{}h", secs / ratum::SECS_PER_HOUR)
-    } else if secs % ratum::SECS_PER_MINUTE == 0 {
+    } else if secs.is_multiple_of(ratum::SECS_PER_MINUTE) {
         format!("{}m", secs / ratum::SECS_PER_MINUTE)
     } else {
         format!("{secs}s")
@@ -349,7 +349,7 @@ impl Limiter {
         let at = ntime.clamp(now.saturating_sub(REPLAY_ALLOWANCE_SECS), now);
         let longest = self.rules.longest_period();
         self.observations += 1;
-        if self.observations % SWEEP_EVERY == 0 {
+        if self.observations.is_multiple_of(SWEEP_EVERY) {
             let cutoff = now.saturating_sub(longest);
             self.rings.retain(|_, ring| ring.newest().is_some_and(|newest| newest >= cutoff));
         }
@@ -542,7 +542,7 @@ mod tests {
             }
         }
         let (secs, ban) = banned_at.expect("4 TH/s is over the 3.5 TH/s cap");
-        assert!(secs >= 6300 && secs <= 7200, "banned {secs}s in: the 2h reading fills first");
+        assert!((6300..=7200).contains(&secs), "banned {secs}s in: the 2h reading fills first");
         assert!(ban.reason.contains("over 2h is over the 3.50 TH/s limit"), "{}", ban.reason);
         assert_eq!(
             (ban.since, ban.until, ban.times),

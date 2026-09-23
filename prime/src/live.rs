@@ -161,6 +161,7 @@ pub fn reload(server: &Server) -> Result<String, String> {
 /// Installs the live settings of `file`, read from `path`, and records the file's
 /// modification time as applied.
 fn apply_file(server: &Server, file: &Options, path: &Path) -> Result<String, String> {
+    settings::check(file, server.share_policy.chain)?;
     let live = Live::from_options(file, server.share_policy.chain)?;
     let mut out = String::new();
     let changes = live.apply(server);
@@ -230,8 +231,9 @@ pub fn set(server: &Server, assignments: &[String]) -> Result<String, String> {
     }
     let new_text = doc.to_string();
     let file: Options = toml::from_str(&new_text).map_err(|e| e.to_string())?;
-    // Refused before the file is written, so a bad value never reaches it.
-    Live::from_options(&file, server.share_policy.chain)?;
+    // Every setting is checked before the file is written, so a value the pool would refuse
+    // at its next start never reaches it.
+    settings::check(&file, server.share_policy.chain)?;
     write_atomically(path, &new_text)?;
     let mut out = format!("wrote {}\n", path.display());
     out.push_str(&apply_file(server, &file, path)?);
@@ -426,6 +428,8 @@ mod tests {
             ("fee=nonsense=25", "--fee address"),
             ("min-dif=1", "min-dif"),
             ("min-diff=soon", "min-diff"),
+            ("min-diff=3", "--min-diff must be a power of two"),
+            ("payout-address=nonsense", "--payout-address"),
             ("fee", "SETTING=VALUE"),
         ] {
             let e = set(&server, &[assignment.to_string()]).unwrap_err();

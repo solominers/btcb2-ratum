@@ -154,6 +154,30 @@ pub fn fees(o: &Options, chain: Option<rpc::Chain>) -> Result<Vec<FeeOutput>, St
     Ok(fees)
 }
 
+/// Every setting `o` holds, checked as startup would check it: the ones that resolve at
+/// startup, the live ones, and the share policy's, each only when given, since a file need
+/// not hold them all. What `--set` and a reload refuse a file on, so a value the pool would
+/// refuse at its next start never reaches the file unremarked.
+pub fn check(o: &Options, chain: Option<rpc::Chain>) -> Result<(), String> {
+    resolve(o)?;
+    fees(o, chain)?;
+    finder_bps(o)?;
+    limiter_rules(o)?;
+    if let Some(tag) = &o.coinbase_tag {
+        coinbase_tag(tag.clone())?;
+    }
+    valid(o.min_diff, "--min-diff", "a power of two", |n| n.is_power_of_two())?;
+    if let Some(address) = &o.payout_address {
+        payout::address_script(address, chain).ok_or_else(|| {
+            format!("--payout-address {address:?} is {}", payout::unpayable_reason(chain))
+        })?;
+    }
+    if let Some(url) = &o.rpc {
+        rpc::Client::new(url, "", "", None).map_err(|e| format!("--rpc: {e}"))?;
+    }
+    Ok(())
+}
+
 /// The finder's cut `--finder-bps` names, 0 to 10000. This is the one reading of the
 /// setting: startup and every reload use it.
 pub fn finder_bps(o: &Options) -> Result<u16, String> {
@@ -446,6 +470,21 @@ mod tests {
             "--public-gateway-fee-subsidy-bps",
         );
         refused(Options { poll: Some(0.0), ..Default::default() }, "--poll");
+        assert_eq!(check(&Options::default(), None), Ok(()), "an empty file checks");
+        for (o, flag) in [
+            (Options { min_diff: Some(3), ..Default::default() }, "--min-diff"),
+            (
+                Options { payout_address: Some("x".into()), ..Default::default() },
+                "--payout-address",
+            ),
+            (Options { coinbase_tag: Some("a\0b".into()), ..Default::default() }, "--coinbase-tag"),
+            (Options { window: Some(0.0), ..Default::default() }, "--window"),
+            (Options { finder_bps: Some(10_001), ..Default::default() }, "--finder-bps"),
+            (Options { rpc: Some("ftp://x".into()), ..Default::default() }, "--rpc"),
+        ] {
+            let e = check(&o, None).unwrap_err();
+            assert!(e.contains(flag), "{flag}: {e}");
+        }
         assert_eq!(finder_bps(&Options::default()), Ok(DEFAULT_FINDER_BPS));
         assert_eq!(finder_bps(&Options { finder_bps: Some(0), ..Default::default() }), Ok(0));
         let e =

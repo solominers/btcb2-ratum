@@ -639,7 +639,11 @@ the default share floor a 3.5 TH/s miner submits about three shares a minute, so
 reading routinely shows double or triple its rate), so the short periods carry thresholds far
 above the cap and only catch a large miner, within about a minute, while the long period holds
 the cap. A reading is work over the whole period, not over the time the identity has been
-seen, so a miner that just started reads low until the period fills.
+seen, so a miner that just started reads low until the period fills. A threshold is a hard
+line read on every share, and a reading wobbles around the miner's true rate (about 5% either
+way over two hours at the default share floor for a 3.5 TH/s miner), so a miner running at
+exactly the long bracket's threshold trips it within hours: set that threshold with margin
+over the rate the pool means to allow, or tell miners to stay some way under it.
 
 A share is placed at its header time, no earlier than 300 seconds before it was accepted: a
 gateway that reconnects replays the shares it queued while away, which would read as a burst
@@ -672,8 +676,9 @@ every other setting applies at a restart. The pool reads them from its settings 
   a string, and for a list setting a comma-separated list of strings, so
   `--set fee=bc1q...=25,bc1q...=0.5%` and `--set 'fee=["bc1q...=25"]'` write the same list.
   `--set fee=` (an empty value) removes the setting, which returns it to its default. A
-  setting that is not live is written too and applies at the next restart. The value is
-  checked before the file is written, so a bad one changes nothing.
+  setting that is not live is written too and applies at the next restart. Every setting in
+  the file is checked as a start would check it before the file is written, so a value the
+  pool would refuse at its next start never reaches it.
 
 Each reading installs the live settings, prints (and logs at `info`) what changed, and names
 the settings that changed in the file since the pool started but apply only at a restart. A
