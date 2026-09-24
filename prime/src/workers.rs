@@ -5,7 +5,6 @@
 
 use ratum::hashrate;
 use std::collections::{HashMap, VecDeque};
-use std::net::SocketAddr;
 use std::time::Duration;
 
 /// The span a worker's hashrate is read over: the stats interface's.
@@ -67,19 +66,22 @@ pub fn worker_name(username: &str) -> &str {
     }
 }
 
-/// A short tag of a gateway's peer address: the first 8 hex digits of its SHA-256d.
-pub fn gateway_tag(peer: SocketAddr) -> String {
-    let hash = ratum::bitcoin::sha256d(peer.to_string().as_bytes());
+/// A short tag of a gateway: the first 8 hex digits of the SHA-256d of its DATUM signing
+/// key, which its hello carries. The same gateway install keeps the same tag across
+/// reconnects and pool restarts; the tag says nothing about where it connects from.
+pub fn gateway_tag(client_sign_pk: &[u8; 32]) -> String {
+    let hash = ratum::bitcoin::sha256d(client_sign_pk);
     hex::encode(&hash[..4])
 }
 
 impl Workers {
-    /// Records a credited share of `difficulty` from `worker` of `identity`, through `peer`.
+    /// Records a credited share of `difficulty` from `worker` of `identity`, through the
+    /// gateway whose signing key is `client_sign_pk`.
     pub fn note(
         &mut self,
         identity: &str,
         worker: &str,
-        peer: SocketAddr,
+        client_sign_pk: &[u8; 32],
         difficulty: u64,
         now: u64,
     ) {
@@ -106,7 +108,7 @@ impl Workers {
         });
         w.last_share_at = now;
         w.shares += 1;
-        w.gateway = gateway_tag(peer);
+        w.gateway = gateway_tag(client_sign_pk);
         w.samples.push_back((now, difficulty));
         if w.samples.len() > MAX_SAMPLES {
             w.samples.pop_front();
@@ -167,8 +169,7 @@ impl Workers {
 mod tests {
     use super::*;
 
-    const PEER: SocketAddr =
-        SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 1);
+    const PEER: [u8; 32] = [7u8; 32];
 
     #[test]
     fn the_worker_name_follows_the_first_dot() {
@@ -179,16 +180,18 @@ mod tests {
         assert_eq!(worker_name("bc1qx.BC1QX.rig1"), "rig1", "in any case");
         assert_eq!(worker_name("bc1qx.bc1qx.bc1qx"), "", "only the address, however often");
         assert_eq!(worker_name("bc1qx.bc1qy.rig1"), "bc1qy.rig1", "another address is kept");
-        assert_eq!(gateway_tag(PEER).len(), 8);
+        assert_eq!(gateway_tag(&PEER).len(), 8);
+        assert_eq!(gateway_tag(&PEER), gateway_tag(&PEER), "one key, one tag");
+        assert_ne!(gateway_tag(&PEER), gateway_tag(&[1u8; 32]));
     }
 
     #[test]
     fn workers_are_listed_with_their_rate_and_forgotten_when_idle() {
         let mut w = Workers::default();
         for i in 0..10u64 {
-            w.note("a", "rig1", PEER, 16384, 1000 + i * 30);
+            w.note("a", "rig1", &PEER, 16384, 1000 + i * 30);
         }
-        w.note("a", "rig2", PEER, 16384, 1300);
+        w.note("a", "rig2", &PEER, 16384, 1300);
         let rows = w.of("a", 1300);
         assert_eq!(rows.len(), 2);
         assert_eq!((rows[0].name.as_str(), rows[0].shares), ("rig2", 1), "most recent first");
@@ -198,7 +201,7 @@ mod tests {
         assert!(w.of("a", 1300 + IDLE_SECS + 1).is_empty(), "idle: not listed");
         assert!(w.of("b", 1300).is_empty());
         for i in 0..SWEEP_EVERY {
-            w.note("b", "x", PEER, 1, 10_000 + i);
+            w.note("b", "x", &PEER, 1, 10_000 + i);
         }
         assert!(!w.by_identity.contains_key("a"), "swept once idle");
     }
@@ -207,7 +210,7 @@ mod tests {
     fn the_worker_count_per_identity_is_bounded() {
         let mut w = Workers::default();
         for i in 0..(MAX_WORKERS_PER_IDENTITY + 5) {
-            w.note("a", &format!("rig{i}"), PEER, 1, 1000 + i as u64);
+            w.note("a", &format!("rig{i}"), &PEER, 1, 1000 + i as u64);
         }
         assert_eq!(w.by_identity["a"].len(), MAX_WORKERS_PER_IDENTITY);
         assert!(!w.by_identity["a"].contains_key("rig0"), "the quietest was replaced");

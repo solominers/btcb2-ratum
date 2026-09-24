@@ -595,7 +595,7 @@ impl Connection<'_> {
         lock(&self.server.workers).note(
             &identity,
             crate::workers::worker_name(&s.username),
-            peer,
+            &self.client_sign_pk,
             rebuilt.difficulty,
             now,
         );
