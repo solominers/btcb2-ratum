@@ -50,9 +50,21 @@ pub struct Workers {
     observations: u64,
 }
 
-/// The worker name in `username`: what follows the first `.`, or empty.
+/// The worker name in `username`: what follows the first `.`, or empty, less any leading
+/// segments that repeat the address. A miner who writes the address as the username on the
+/// rig, and a gateway that passes usernames on under its own address, produce
+/// `address.address.rig1`; the rig is `rig1`.
 pub fn worker_name(username: &str) -> &str {
-    ratum::username::split_address_worker(username).1.strip_prefix('.').unwrap_or("")
+    let address = ratum::username::identity_of(username);
+    let mut worker = ratum::username::split_address_worker(username).1;
+    loop {
+        let rest = worker.strip_prefix('.').unwrap_or("");
+        let (head, tail) = ratum::username::split_address_worker(rest);
+        if head.is_empty() || ratum::bitcoin::address::canonical(head) != address {
+            return rest;
+        }
+        worker = tail;
+    }
 }
 
 /// A short tag of a gateway's peer address: the first 8 hex digits of its SHA-256d.
@@ -163,6 +175,10 @@ mod tests {
         assert_eq!(worker_name("bc1qx.rig3"), "rig3");
         assert_eq!(worker_name("bc1qx"), "");
         assert_eq!(worker_name("bc1qx.a.b"), "a.b");
+        assert_eq!(worker_name("bc1qx.bc1qx.rig1"), "rig1", "the address repeated is not a rig");
+        assert_eq!(worker_name("bc1qx.BC1QX.rig1"), "rig1", "in any case");
+        assert_eq!(worker_name("bc1qx.bc1qx.bc1qx"), "", "only the address, however often");
+        assert_eq!(worker_name("bc1qx.bc1qy.rig1"), "bc1qy.rig1", "another address is kept");
         assert_eq!(gateway_tag(PEER).len(), 8);
     }
 
