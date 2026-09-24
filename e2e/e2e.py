@@ -1050,32 +1050,33 @@ def finder_split(stack: Stack, a: argparse.Namespace) -> None:
 
 
 def hash_limit(stack: Stack, a: argparse.Namespace) -> None:
-    """One gateway and one miner under a hashrate limit no miner is under: the first
-    accepted share bans the miner's address, the shares after it are refused with
-    HashLimit and the gateway tells its miners, `--bans` lists the ban, `--unban` ends it
-    and shares are accepted again, and `--set` changes a live setting the running pool
-    then shows."""
+    """One gateway and one miner under a hashrate limit no miner is under: once the address
+    reads over it, its shares are refused with HashLimit and the gateway tells its miners,
+    nothing is banned and the address is listed as throttled with its home gateway; the
+    limit removed, shares are accepted again; a ban by the operators refuses them, `--bans`
+    lists it and `--unban` ends it; and `--set` changes live settings the running pool then
+    shows."""
     stack.require_tools()
     stack.build_release()
     stack.start_node()
     stack.mine_through_activation()
 
-    step("starting ratum-prime with a 1 H/s limit over 1 minute, bans of 1 hour")
+    step("starting ratum-prime with a 1 H/s limit over 1 minute")
     stack.start_pool("--hash-limit", "1m=1", "--ban-secs", "3600")
     stratum_port, api_port = free_port(23300, 90), free_port(7100, 90)
     step(f"starting the gateway on stratum port {stratum_port}")
     stack.start_gateway("A", stratum_port, api_port, GATEWAY_ADDRESS, "e2e")
-    step("mining until the first share is accepted and the miner banned")
+    step("mining until the address is over the limit and its shares are refused")
     stack.start_miner(f"{MINER_ADDRESS}.rig1", "rig1", stratum_port)
     if not stack.wait_until(
-        lambda: f"{MINER_ADDRESS} banned until" in stack.pool_log(), a.timeout,
+        lambda: f"{MINER_ADDRESS} is over its hashrate limit" in stack.pool_log(), a.timeout,
         lambda: f"{len(stack.acceptances())} share(s) accepted",
     ):
-        fail(f"no ban within {a.timeout}s; see {stack.pool_log_path}")
+        fail(f"no refusal within {a.timeout}s; see {stack.pool_log_path}")
     accepted_before = len(stack.acceptances())
-    print(f"  banned after {accepted_before} accepted share(s)")
+    print(f"  refused after {accepted_before} accepted share(s)")
 
-    step("the shares after the ban are refused with HashLimit and the gateway tells its miners")
+    step("the shares are refused with HashLimit and the gateway tells its miners; nothing is banned")
     gateway_log = stack.work / "gateway-A.log"
     if not stack.wait_until(
         lambda: "HashLimit (45)" in gateway_log.read_text(errors="replace"), a.timeout,
@@ -1084,35 +1085,68 @@ def hash_limit(stack: Stack, a: argparse.Namespace) -> None:
         fail(f"the gateway logged no HashLimit refusal within {a.timeout}s; see {gateway_log}")
     if "client.show_message" not in gateway_log.read_text(errors="replace") and "over the pool's hashrate limit" not in gateway_log.read_text(errors="replace"):
         fail(f"the gateway did not tell its miners; see {gateway_log}")
-    if len(stack.acceptances()) != accepted_before:
-        fail("a share was accepted after the ban")
     stats = stack.stats()
-    bans = stats["limiter"]["bans"]
-    if len(bans) != 1 or bans[0]["identity"] != MINER_ADDRESS:
-        fail(f"/stats.json limiter.bans is {bans}")
-    print(f"  ban: {bans[0]['reason']}")
+    throttled = stats["limiter"]["throttled"]
+    if len(throttled) != 1 or throttled[0]["identity"] != MINER_ADDRESS:
+        fail(f"/stats.json limiter.throttled is {throttled}")
+    if not throttled[0]["home_gateway"] or throttled[0]["refused_gateways"]:
+        fail(f"the one gateway that mines the address is its home: {throttled[0]}")
+    if stats["limiter"]["bans"]:
+        fail(f"the limiter banned: {stats['limiter']['bans']}")
+    miner = next(m for m in stats["window"]["miners"] if m["identity"] == MINER_ADDRESS)
+    if not miner["throttled"] or miner["banned_until"]:
+        fail(f"the miner's entry: throttled {miner['throttled']}, banned_until {miner['banned_until']}")
+    print(f"  refused: {throttled[0]['reason']} (home gateway {throttled[0]['home_gateway']})")
+    # The limit is one no share is under, so once a minute the reading empties and one share
+    # is accepted again before the next is refused: a slow trickle, not a stop.
+    out = stack.prime_command("--bans")
+    if MINER_ADDRESS in out:
+        fail(f"--bans lists the miner: {out!r}")
 
-    step("the ban is listed and ended over the control socket, and shares are accepted again")
+    step("the limit removed with --set, every share is accepted again and nothing is throttled")
+    out = stack.prime_command("--set", "hash-limit=")
+    if "hash-limit: none" not in out:
+        fail(f"--set hash-limit=: {out!r}")
+    after_limit = len(stack.acceptances())
+    if not stack.wait_until(
+        lambda: len(stack.acceptances()) >= after_limit + 3, a.timeout,
+        lambda: f"{len(stack.acceptances())} share(s) accepted",
+    ):
+        fail(f"shares are not accepted again; see {stack.pool_log_path}")
+    if stack.stats()["limiter"]["throttled"]:
+        fail("/stats.json still lists the address as throttled")
+
+    step("a ban by the operators refuses every share; --bans lists it and --unban ends it")
+    out = stack.prime_command("--ban", MINER_ADDRESS, "--ban-secs", "3600")
+    if "banned until" not in out:
+        fail(f"--ban: {out!r}")
     out = stack.prime_command("--bans")
     if MINER_ADDRESS not in out:
         fail(f"--bans did not list the miner: {out!r}")
+    refusals_before = gateway_log.read_text(errors="replace").count("HashLimit (45)")
+    if not stack.wait_until(
+        lambda: gateway_log.read_text(errors="replace").count("HashLimit (45)") > refusals_before, a.timeout,
+        lambda: "waiting for a refused share",
+    ):
+        fail(f"no share refused under the ban; see {gateway_log}")
+    bans = stack.stats()["limiter"]["bans"]
+    if len(bans) != 1 or bans[0]["identity"] != MINER_ADDRESS or bans[0]["times"] != 1:
+        fail(f"/stats.json limiter.bans is {bans}")
+    accepted_under_ban = len(stack.acceptances())
     out = stack.prime_command("--unban", MINER_ADDRESS)
     if "is ended" not in out:
         fail(f"--unban: {out!r}")
     if not stack.wait_until(
-        lambda: len(stack.acceptances()) > accepted_before, a.timeout,
+        lambda: len(stack.acceptances()) > accepted_under_ban, a.timeout,
         lambda: f"{len(stack.acceptances())} share(s) accepted",
     ):
         fail(f"no share accepted within {a.timeout}s of the unban; see {stack.pool_log_path}")
-    # The limit is one no share is under, so the share accepted after the unban bans the
-    # address again: the second ban, counted.
-    bans = stack.stats()["limiter"]["bans"]
-    if bans and bans[0]["times"] != 2:
-        fail(f"/stats.json lists a ban that is not the second one: {bans}")
-    print(f"  after the unban: {len(stack.acceptances()) - accepted_before} share(s) accepted, then banned again")
+    if stack.stats()["limiter"]["bans"]:
+        fail("the ban still holds")
+    print(f"  after the unban: {len(stack.acceptances()) - accepted_under_ban} share(s) accepted")
 
     step("a live setting changed with --set is written to the file and shown by the pool")
-    out = stack.prime_command("--set", "finder-bps=1234", "--set", "hash-limit=")
+    out = stack.prime_command("--set", "finder-bps=1234")
     if "finder-bps: 1234" not in out:
         fail(f"--set: {out!r}")
     out = stack.prime_command("--show-settings")
@@ -1130,7 +1164,6 @@ def hash_limit(stack: Stack, a: argparse.Namespace) -> None:
 
     step("the coinbase tag changed with --set reaches the connected gateway, and shares on "
          "jobs built before and after the change are accepted")
-    stack.prime_command("--unban", MINER_ADDRESS)
     accepted_before = len(stack.acceptances())
     # The pool started with --coinbase-tag RATUM on its command line; the file is what a
     # reload reads, so the earlier --set already made the tag the file's (none).
@@ -1158,7 +1191,7 @@ def hash_limit(stack: Stack, a: argparse.Namespace) -> None:
         fail("/stats.json does not report the new tag")
     print(f"  {len(stack.acceptances()) - accepted_before} share(s) accepted since the tag change")
 
-    step("passed: banned, refused, told, listed, unbanned, accepted again; settings and the tag changed live")
+    step("passed: refused while over, told, listed as throttled, accepted again; banned and unbanned by hand; settings and the tag changed live")
     stack.print_ledger(stack.stop_and_dump_ledger())
 
 

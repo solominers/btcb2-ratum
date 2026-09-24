@@ -33,6 +33,8 @@ use std::time::{Duration, Instant};
 /// The distinct unpayable identities one connection names at warn level. Past this the rest
 /// are left at debug, so a gateway sending an unbounded number of bad usernames cannot fill
 /// the log.
+/// How often a hashrate-limit refusal of one identity is logged at `warn` per connection.
+const REFUSAL_LOG_INTERVAL_SECS: u64 = 10 * ratum::SECS_PER_MINUTE;
 pub(super) const MAX_REPORTED_UNPAYABLE: usize = 4096;
 
 /// How long a gateway has to send a job's transactions once the pool requested them. Its
@@ -569,8 +571,8 @@ impl Connection<'_> {
     }
 
     /// Records the share's credit, or refuses it when its identity cannot be paid, is banned
-    /// by the hashrate limiter, or the ledger cannot record it. A credited share is then
-    /// observed by the limiter, whose ban begins with the next share.
+    /// by the operators, is over its hashrate limit (`Limiter::check`), or the ledger cannot
+    /// record it. A credited share is then observed by the limiter.
     fn credit(&mut self, s: &PowSubmit, rebuilt: &RebuiltShare, now: u64) -> ShareVerdict {
         if self.refuse_if_unpayable(&s.username) {
             return ShareVerdict::Rejected(RejectReason::BadUsername);
@@ -583,6 +585,10 @@ impl Connection<'_> {
                 ban.until.saturating_sub(now),
                 ban.reason
             );
+            return ShareVerdict::Rejected(RejectReason::HashLimit);
+        }
+        if let Some(refusal) = lock(&self.server.limiter).check(&identity, &self.client_sign_pk, now) {
+            self.report_refusal(&identity, &refusal, now);
             return ShareVerdict::Rejected(RejectReason::HashLimit);
         }
         if let Err(e) = accounting::credit_share(self.server, peer, &s.username, rebuilt, now) {
@@ -600,18 +606,43 @@ impl Connection<'_> {
             now,
         );
         let ntime = u64::from(s.block_time());
-        let banned = lock(&self.server.limiter).observe(&identity, ntime, rebuilt.difficulty, now);
-        if let Some(ban) = banned {
-            warn!(
-                "[{peer}]   ** {identity} banned until {} (ban {}, {}s): {}; its shares are \
-                 refused until then",
-                ban.until,
-                ban.times,
-                ban.until.saturating_sub(ban.since),
-                ban.reason
-            );
-        }
+        lock(&self.server.limiter).observe(
+            &identity,
+            &self.client_sign_pk,
+            ntime,
+            rebuilt.difficulty,
+            now,
+        );
         ShareVerdict::Accepted
+    }
+
+    /// Logs a hashrate-limit refusal at `warn` once per identity per `REFUSAL_LOG_INTERVAL`
+    /// on this connection, at `debug` otherwise.
+    fn report_refusal(&mut self, identity: &str, refusal: &crate::limiter::Refusal, now: u64) {
+        let peer = self.peer;
+        let last = self.refusals_reported.get(identity).copied();
+        if last.is_some_and(|t| now < t.saturating_add(REFUSAL_LOG_INTERVAL_SECS)) {
+            debug!("[{peer}]   <- rejected: {identity} over its hashrate limit ({})", refusal.reason);
+            return;
+        }
+        if self.refusals_reported.len() >= MAX_REPORTED_UNPAYABLE {
+            self.refusals_reported.clear();
+        }
+        self.refusals_reported.insert(identity.to_string(), now);
+        let which = match (refusal.own, &refusal.home) {
+            (true, _) => "this gateway alone is over, so its shares are refused too".to_string(),
+            (false, Some(home)) => format!(
+                "the shares of its home gateway ({}) are still accepted; this gateway's are \
+                 refused",
+                crate::workers::gateway_tag(home)
+            ),
+            (false, None) => "no gateway has mined it long enough to be its home".to_string(),
+        };
+        warn!(
+            "[{peer}]   ** {identity} is over its hashrate limit: {}; {which}. Its shares are \
+             refused while it stays over, and accepted again once the reading falls",
+            refusal.reason
+        );
     }
 
     fn refuse_if_unpayable(&mut self, username: &str) -> bool {

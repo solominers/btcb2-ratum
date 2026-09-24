@@ -134,7 +134,7 @@ pub struct PoolState {
 }
 
 /// The pool refusing this gateway's shares because a miner's address is over its hashrate
-/// limit and banned.
+/// limit, or banned by the operators.
 #[derive(Clone, Debug)]
 pub struct BanNotice {
     pub at: std::time::Instant,

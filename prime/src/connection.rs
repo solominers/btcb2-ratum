@@ -164,6 +164,7 @@ pub fn handle(stream: TcpStream, server: &Server) -> io::Result<()> {
         verifier: Verifier::new(&server.share_policy),
         tag_generation: server.tag_generation(),
         reported_unpayable: BoundedSet::new(shares::MAX_REPORTED_UNPAYABLE),
+        refusals_reported: std::collections::HashMap::new(),
         held: Vec::new(),
         txn_requests: VecDeque::new(),
         warned: shares::WarnCounts::default(),
@@ -207,6 +208,8 @@ struct Connection<'a> {
     /// rather than only the first; the set is bounded so a gateway sending many of them
     /// cannot fill the log.
     reported_unpayable: BoundedSet<String>,
+    /// When each identity's hashrate-limit refusal was last logged at `warn` here.
+    refusals_reported: std::collections::HashMap<String, u64>,
     /// The shares waiting for their job's transactions, in the order they arrived.
     held: Vec<shares::HeldShare>,
     /// The requests for jobs' transactions not yet answered, in the order they were sent.

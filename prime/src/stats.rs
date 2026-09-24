@@ -253,8 +253,13 @@ fn owed_json(
 fn miners_json(server: &Server, l: &LedgerView) -> Vec<Value> {
     let chain = server.share_policy.chain;
     let now = ratum::unix_now();
-    let banned_until: HashMap<String, u64> =
-        lock(&server.limiter).active_bans(now).into_iter().map(|b| (b.identity, b.until)).collect();
+    let (banned_until, throttled): (HashMap<String, u64>, HashMap<String, serde_json::Value>) = {
+        let limiter = lock(&server.limiter);
+        (
+            limiter.active_bans(now).into_iter().map(|b| (b.identity, b.until)).collect(),
+            limiter.throttled(now).into_iter().map(|t| (t.identity.clone(), t.json())).collect(),
+        )
+    };
     let workers = lock(&server.workers);
     l.miners
         .iter()
@@ -275,6 +280,7 @@ fn miners_json(server: &Server, l: &LedgerView) -> Vec<Value> {
                 "tag": m.state.tag_secondary,
                 "own_gateway_work": m.state.own_gateway_work.to_string(),
                 "banned_until": banned_until.get(&m.identity),
+                "throttled": throttled.get(&m.identity),
                 "carry_work": m.carry.to_string(),
                 "workers": workers.of(&m.identity, now).iter().map(|w| json!({
                     "name": w.name,
@@ -455,7 +461,9 @@ pub(crate) fn snapshot(server: &Server, history: &Mutex<HashrateHistory>) -> Val
     let limiter = {
         let limiter = lock(&server.limiter);
         let mut v = limiter.rules().json();
-        v["bans"] = limiter.active_bans(ratum::unix_now()).iter().map(|b| b.json()).collect();
+        let now = ratum::unix_now();
+        v["bans"] = limiter.active_bans(now).iter().map(|b| b.json()).collect();
+        v["throttled"] = limiter.throttled(now).iter().map(|t| t.json()).collect();
         v
     };
 

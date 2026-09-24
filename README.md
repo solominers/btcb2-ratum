@@ -320,7 +320,7 @@ min-diff = 16384                          # smallest share difficulty credited, 
 | `--watch-config <bool>` | true | re-read the settings file when it changes (see "Live settings") |
 | `--hash-limit <period>=<rate>,...` | none | the hashrate brackets an identity may not exceed; live (see "Hashrate limiter") |
 | `--hash-limit-sigma <n>` | 0 | the statistical margin on every bracket, in standard deviations of the reading; live |
-| `--ban-secs <n>` | 86400 | how long a ban runs; live |
+| `--ban-secs <n>` | 86400 | how long a `--ban` runs; live |
 | `--ban-escalation <factor>` | 1 | the factor each repeat ban is longer by; live |
 | `--public-gateway-tag <text>` | none | the public gateway's secondary coinbase tag |
 | `--public-gateway-fee-bps <n>` | 0 | the fee on public-gateway work, at most 10000 |
@@ -644,8 +644,10 @@ bring at most a bounded hashrate. `--hash-limit` names the brackets, each `<peri
 (`1m=100T`, `5m=50T`, `30m=10T`, `2h=3.5T`; a period in seconds, minutes or hours from 10 s to
 24 h, a rate in H/s with K, M, G, T or P), comma-separated on the command line and a list in
 the file (`hash-limit = ["1m=100T", "5m=50T", "30m=10T", "2h=3.5T"]`). At most 8 brackets;
-none is no limit. On every accepted share the identity's difficulty-weighted work over each
-bracket's period is read as a hashrate, and an identity over any bracket is banned.
+none is no limit. On every share the identity's difficulty-weighted work over each bracket's
+period is read as a hashrate, and while an identity is over any bracket its shares are
+refused. Nothing is banned by the limiter: a refused share is not recorded, so the reading
+falls as the window rolls and the refusals end on their own.
 
 The brackets are read together: a small miner's share arrivals vary a lot over a minute (at
 the default share floor a 3.5 TH/s miner submits about three shares a minute, so its one-minute
@@ -656,27 +658,44 @@ seen, so a miner that just started reads low until the period fills. A threshold
 line read on every share, and a reading wobbles around the miner's true rate (about 5% either
 way over two hours at the default share floor for a 3.5 TH/s miner), so a miner running at
 exactly the long bracket's threshold trips it within hours. `--hash-limit-sigma` sizes a
-margin to that wobble: a reading over `n` shares bans only when it exceeds the threshold by
-`sigma / sqrt(n)` of it, at most 25% however few shares it rests on, and the ban's reason
-names the rate that was allowed. With `--hash-limit-sigma 3`, a 3.5 TH/s miner sending 360
-shares in two hours is allowed 15.8% over the bracket's threshold, a three-sigma excursion it
-makes about once in seven hundred readings, while a miner 30% over is banned within the
-period. 0, the default, bans on the threshold itself.
+margin to that wobble: a reading over `n` shares refuses only when it exceeds the threshold
+by `sigma / sqrt(n)` of it, at most 25% however few shares it rests on, and the refusal's
+reason names the rate that was allowed. With `--hash-limit-sigma 3`, a 3.5 TH/s miner sending
+360 shares in two hours is allowed 15.8% over the bracket's threshold, a three-sigma
+excursion it makes about once in seven hundred readings, while a miner 30% over is refused
+within the period. 0, the default, refuses on the threshold itself.
+
+Which shares are refused depends on the gateway they come through. The pool keeps, for each
+identity, the gateways (by their DATUM signing key, which a hello carries and nothing else
+can produce) that have mined it and their accepted work by day; the one with the most work
+over the last 7 days is the identity's home gateway. While the identity is over a bracket,
+shares from every other gateway are refused, and the home gateway's own are refused only if
+they alone are over. So a miner over the cap on several gateways keeps the one that has
+mined the address the longest, a big miner on one gateway is refused as before, and anyone
+pointing hashrate at someone else's address to get its shares refused gets only their own
+gateway refused, at the price of the work they gave the address. The gateway records are
+written to the ledger file (table `gateways`), so a restart keeps each identity's home.
 
 A share is placed at its header time, no earlier than 300 seconds before it was accepted: a
 gateway that reconnects replays the shares it queued while away, which would read as a burst
 at their acceptance time, and a header time can be pushed back only that far, where the
-longer brackets have the measure. The shares an identity was credited before its ban stay in
-the window: they were under the limit when they were accepted.
+longer brackets have the measure. The shares an identity was credited before a refusal stay
+in the window: they were under the limit when they were accepted.
 
-A ban refuses the identity's shares with reason `HashLimit` (code 45) until it ends, after
-`--ban-secs` (a day by default), times `--ban-escalation` to the power of the identity's earlier
-bans (1 by default: every ban the same length; 2 doubles it each time). A share that is a
-block is still relayed to the network before it is refused. Bans are written to the ledger
-file, so a restart keeps them and the count of an identity's bans; a memory-only pool holds
-them until it stops. The pool logs each ban at `warn`, `/stats.json` lists the brackets and
-the bans under `limiter` and each banned miner's `banned_until`, `--bans` prints them, and
-`--ban` and `--unban` set and end one by hand (all through the running pool).
+A refusal answers the share with reason `HashLimit` (code 45); a share that is a block is
+still relayed to the network before it is refused. The pool logs the first refusal of each
+identity on a connection at `warn`, naming the reading and which gateway keeps being
+accepted, and again every 10 minutes while they go on. `/stats.json` lists under `limiter`
+the brackets, `throttled` (each identity over its cap now: since when, the reading, its home
+gateway's tag and the tags of the gateways being refused) and the bans, and each miner
+carries `throttled` and `banned_until`.
+
+The operators can ban an identity by hand: `--ban <identity>` refuses its shares from every
+gateway for `--ban-secs` (a day by default), times `--ban-escalation` to the power of the
+identity's earlier bans (1 by default: every ban the same length; 2 doubles it each time),
+`--unban` ends it and `--bans` prints the bans holding. Bans are written to the ledger file,
+so a restart keeps them and the count of an identity's bans; a memory-only pool holds them
+until it stops.
 
 ### Live settings
 

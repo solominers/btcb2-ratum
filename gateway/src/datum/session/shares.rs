@@ -70,8 +70,9 @@ impl Session<'_> {
             }
             ShareVerdict::Rejected(RejectReason::HashLimit) => {
                 let message = "the pool refuses this gateway's shares: a miner's payout \
-                               address is over the pool's hashrate limit and banned; see the \
-                               pool's /stats.json (limiter.bans) for how long";
+                               address is over the pool's hashrate limit, or banned by the \
+                               operators; the pool's site says which and what to do (its \
+                               /stats.json: limiter.throttled, limiter.bans)";
                 if self.gateway.pool.note_hash_limit(message) {
                     warn!("DATUM share rejected: {what}: HashLimit (45): {message}");
                     self.gateway.stratum.show_message_all(message);
