@@ -1,7 +1,7 @@
 # RATUM
 
 This is a modified version of [ratum](https://github.com/iohzrd/ratum) by iohzrd, changed by
-xbtsolominers from September 2026 (a solo-lottery pool: fee outputs, a finder's cut, carried
+solominers from September 2026 (a solo-lottery pool: fee outputs, a finder's cut, carried
 work, a per-address hashrate limiter, live settings). It stays under the GNU Affero General
 Public License, version 3 or later; see [LICENSE](LICENSE).
 
