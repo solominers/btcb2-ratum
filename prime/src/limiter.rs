@@ -41,6 +41,11 @@ pub const MAX_PERIOD_SECS: u64 = ratum::SECS_PER_DAY;
 const MAX_BAN_SECS: u64 = 365 * ratum::SECS_PER_DAY;
 /// How many observations pass between sweeps of identities that have gone quiet.
 const SWEEP_EVERY: u64 = 4096;
+/// The most a reading may exceed a threshold by under `--hash-limit-sigma`, however few
+/// shares it rests on: an identity sending a handful of high-difficulty shares gets no wider
+/// an allowance than this.
+pub const MAX_SIGMA_TOLERANCE: f64 = 0.25;
+pub const MAX_SIGMA: f64 = 10.0;
 
 /// One measure: the hashrate over `period` an identity may not exceed.
 #[derive(Clone, Debug, PartialEq)]
@@ -57,11 +62,16 @@ pub struct Rules {
     pub ban_secs: u64,
     /// The factor each repeat ban is longer by: 1 for the same length every time.
     pub escalation: f64,
+    /// The statistical margin: a reading over `n` shares must exceed the threshold by
+    /// `sigma / sqrt(n)` of it (at most `MAX_SIGMA_TOLERANCE`) to ban, since a rate measured
+    /// from `n` share arrivals wobbles by about `1 / sqrt(n)` of itself. 0 bans on the
+    /// threshold itself.
+    pub sigma: f64,
 }
 
 impl Default for Rules {
     fn default() -> Self {
-        Self { brackets: Vec::new(), ban_secs: ratum::SECS_PER_DAY, escalation: 1.0 }
+        Self { brackets: Vec::new(), ban_secs: ratum::SECS_PER_DAY, escalation: 1.0, sigma: 0.0 }
     }
 }
 
@@ -71,6 +81,16 @@ impl Rules {
     }
 
     /// How long the ban after `prior` earlier bans runs.
+    /// The rate a reading over `shares` shares must exceed for `bracket` to ban.
+    pub fn allowed(&self, bracket: &Bracket, shares: usize) -> f64 {
+        let tolerance = if self.sigma > 0.0 {
+            (self.sigma / (shares.max(1) as f64).sqrt()).min(MAX_SIGMA_TOLERANCE)
+        } else {
+            0.0
+        };
+        bracket.threshold_hs * (1.0 + tolerance)
+    }
+
     pub fn ban_length(&self, prior: u32) -> u64 {
         let factor = self.escalation.max(1.0).powi(prior.min(64) as i32);
         let secs = (self.ban_secs as f64 * factor).min(MAX_BAN_SECS as f64);
@@ -87,8 +107,9 @@ impl Rules {
             .map(|b| format!("{} {}", period_text(b.period_secs), hashrate_text(b.threshold_hs)))
             .collect();
         format!(
-            "hash-limit: {} (over any bracket: banned)\nban-secs: {} ({})\nban-escalation: {}\n",
+            "hash-limit: {} (over any bracket: banned)\nhash-limit-sigma: {}\nban-secs: {} ({})\nban-escalation: {}\n",
             each.join(", "),
+            self.sigma,
             self.ban_secs,
             period_text(self.ban_secs),
             self.escalation
@@ -103,6 +124,7 @@ impl Rules {
             })).collect::<Vec<_>>(),
             "ban_secs": self.ban_secs,
             "ban_escalation": self.escalation,
+            "sigma": self.sigma,
         })
     }
 }
@@ -131,7 +153,12 @@ pub fn parse_bracket(text: &str) -> Result<Bracket, String> {
 
 /// The rules `entries` name (each `parse_bracket`), sorted by period: at most `MAX_BRACKETS`,
 /// no two on one period.
-pub fn rules_from(entries: &[String], ban_secs: u64, escalation: f64) -> Result<Rules, String> {
+pub fn rules_from(
+    entries: &[String],
+    ban_secs: u64,
+    escalation: f64,
+    sigma: f64,
+) -> Result<Rules, String> {
     let mut brackets = Vec::new();
     for entry in entries.iter().map(|e| e.trim()).filter(|e| !e.is_empty()) {
         let bracket = parse_bracket(entry).map_err(|e| format!("--hash-limit {e}"))?;
@@ -156,7 +183,10 @@ pub fn rules_from(entries: &[String], ban_secs: u64, escalation: f64) -> Result<
     if !escalation.is_finite() || escalation < 1.0 {
         return Err("--ban-escalation must be 1 (every ban the same length) or more".to_string());
     }
-    Ok(Rules { brackets, ban_secs, escalation })
+    if !sigma.is_finite() || !(0.0..=MAX_SIGMA).contains(&sigma) {
+        return Err(format!("--hash-limit-sigma must be from 0 (ban on the threshold itself) to {MAX_SIGMA}"));
+    }
+    Ok(Rules { brackets, ban_secs, escalation, sigma })
 }
 
 pub fn parse_period(text: &str) -> Option<u64> {
@@ -272,6 +302,10 @@ impl Ring {
         self.samples.iter().filter(|(at, _)| *at >= cutoff).map(|(_, d)| u128::from(*d)).sum()
     }
 
+    fn count_since(&self, cutoff: u64) -> usize {
+        self.samples.iter().filter(|(at, _)| *at >= cutoff).count()
+    }
+
     fn newest(&self) -> Option<u64> {
         self.samples.back().map(|(at, _)| *at)
     }
@@ -357,15 +391,28 @@ impl Limiter {
         ring.push(at, difficulty);
         ring.trim(now.saturating_sub(longest));
         let over = self.rules.brackets.iter().find_map(|b| {
-            let work = ring.work_since(now.saturating_sub(b.period_secs));
+            let cutoff = now.saturating_sub(b.period_secs);
+            let work = ring.work_since(cutoff);
             let hs = hashrate::from_work(work, Duration::from_secs(b.period_secs));
-            (hs > b.threshold_hs).then(|| {
-                format!(
-                    "{} over {} is over the {} limit",
-                    hashrate_text(hs),
-                    period_text(b.period_secs),
-                    hashrate_text(b.threshold_hs)
-                )
+            let shares = ring.count_since(cutoff);
+            let allowed = self.rules.allowed(b, shares);
+            (hs > allowed).then(|| {
+                if allowed > b.threshold_hs {
+                    format!(
+                        "{} over {} is over the {} limit ({} allowed for a reading of {shares} shares)",
+                        hashrate_text(hs),
+                        period_text(b.period_secs),
+                        hashrate_text(b.threshold_hs),
+                        hashrate_text(allowed)
+                    )
+                } else {
+                    format!(
+                        "{} over {} is over the {} limit",
+                        hashrate_text(hs),
+                        period_text(b.period_secs),
+                        hashrate_text(b.threshold_hs)
+                    )
+                }
             })
         })?;
         Some(self.ban(identity, now, None, over))
@@ -450,7 +497,7 @@ mod tests {
 
     fn rules(entries: &[&str]) -> Rules {
         let entries: Vec<String> = entries.iter().map(|e| e.to_string()).collect();
-        rules_from(&entries, ratum::SECS_PER_DAY, 1.0).unwrap()
+        rules_from(&entries, ratum::SECS_PER_DAY, 1.0, 0.0).unwrap()
     }
 
     fn starter() -> Rules {
@@ -495,11 +542,13 @@ mod tests {
             let e = parse_bracket(entry).unwrap_err();
             assert!(e.contains(what), "{entry}: {e}");
         }
-        let twice = rules_from(&["5m=1T".into(), "300s=2T".into()], 60, 1.0).unwrap_err();
+        let twice = rules_from(&["5m=1T".into(), "300s=2T".into()], 60, 1.0, 0.0).unwrap_err();
         assert!(twice.contains("twice"), "{twice}");
-        assert!(rules_from(&[], 0, 1.0).unwrap_err().contains("--ban-secs"));
-        assert!(rules_from(&[], 60, 0.5).unwrap_err().contains("--ban-escalation"));
-        assert!(rules_from(&[], 60, 1.0).unwrap().brackets.is_empty(), "no brackets: no limit");
+        assert!(rules_from(&[], 0, 1.0, 0.0).unwrap_err().contains("--ban-secs"));
+        assert!(rules_from(&[], 60, 0.5, 0.0).unwrap_err().contains("--ban-escalation"));
+        assert!(rules_from(&[], 60, 1.0, -1.0).unwrap_err().contains("--hash-limit-sigma"));
+        assert!(rules_from(&[], 60, 1.0, 11.0).unwrap_err().contains("--hash-limit-sigma"));
+        assert!(rules_from(&[], 60, 1.0, 0.0).unwrap().brackets.is_empty(), "no brackets: no limit");
     }
 
     #[test]
@@ -554,6 +603,44 @@ mod tests {
     }
 
     #[test]
+    fn the_sigma_margin_spares_a_miner_near_the_cap_and_still_bans_one_over_it() {
+        let mut rules = starter();
+        rules.sigma = 3.0;
+        // A share every 20 seconds is 360 shares over the 2 hour bracket: a margin of
+        // 3 / sqrt(360), 15.8%, so 4.05 TH/s is allowed on the 3.5 TH/s cap.
+        let bracket = &rules.brackets[3];
+        assert_eq!(bracket.period_secs, 7200);
+        let allowed = rules.allowed(bracket, 360);
+        assert!((4.05 * T..4.06 * T).contains(&allowed), "{allowed}");
+        assert!((rules.allowed(bracket, 1) - 3.5 * T * 1.25).abs() < 1.0, "few shares: the cap on the margin");
+        assert_eq!(starter().allowed(bracket, 360), 3.5 * T, "sigma 0: the threshold itself");
+
+        // 4 TH/s, 14% over the cap, is under the margin: never banned.
+        let mut l = Limiter::new(rules.clone());
+        let diff = work_for(4.0 * T, 20.0);
+        for i in 0..(6 * 3600 / 20) {
+            let now = 1_000_000 + i * 20;
+            assert_eq!(l.observe("near", now, diff, now), None, "share {i}");
+        }
+        // 4.5 TH/s, 29% over, is banned within the period, and the reason names the margin.
+        let mut l = Limiter::new(rules);
+        let diff = work_for(4.5 * T, 20.0);
+        let ban = (0..(3 * 3600 / 20))
+            .find_map(|i| {
+                let now = 1_000_000 + i * 20;
+                l.observe("over", now, diff, now)
+            })
+            .expect("4.5 TH/s is over the margin");
+        // The reading climbs as the window fills and crosses the margin before it is full,
+        // so the share count in the reason is what the reading rested on then.
+        assert!(
+            ban.reason.contains("over the 3.50 TH/s limit (") && ban.reason.contains(" allowed for a reading of "),
+            "{}",
+            ban.reason
+        );
+    }
+
+    #[test]
     fn a_large_miner_is_caught_by_the_short_bracket_in_a_minute() {
         let mut l = Limiter::new(starter());
         // 200 TH/s at a difficulty solved every 5 seconds.
@@ -600,7 +687,7 @@ mod tests {
         let path = dir.join("bans.redb");
         let _ = std::fs::remove_file(&path);
         let db = Arc::new(redb::Database::create(&path).unwrap());
-        let rules = rules_from(&["1m=1T".into()], 100, 2.0).unwrap();
+        let rules = rules_from(&["1m=1T".into()], 100, 2.0, 0.0).unwrap();
         assert_eq!(
             (rules.ban_length(0), rules.ban_length(1), rules.ban_length(3)),
             (100, 200, 800)

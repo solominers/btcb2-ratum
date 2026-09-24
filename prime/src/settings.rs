@@ -188,14 +188,15 @@ pub fn finder_bps(o: &Options) -> Result<u16, String> {
     )
 }
 
-/// The hashrate limiter's rules: `--hash-limit`, `--ban-secs` (a day by default) and
-/// `--ban-escalation` (1 by default). This is the one reading of them: startup and every
-/// reload use it.
+/// The hashrate limiter's rules: `--hash-limit`, `--hash-limit-sigma` (0 by default),
+/// `--ban-secs` (a day by default) and `--ban-escalation` (1 by default). This is the one
+/// reading of them: startup and every reload use it.
 pub fn limiter_rules(o: &Options) -> Result<Rules, String> {
     limiter::rules_from(
         &o.hash_limit,
         o.ban_secs.unwrap_or(ratum::SECS_PER_DAY),
         o.ban_escalation.unwrap_or(1.0),
+        o.hash_limit_sigma.unwrap_or(0.0),
     )
 }
 

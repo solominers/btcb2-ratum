@@ -319,6 +319,7 @@ min-diff = 16384                          # smallest share difficulty credited, 
 | `--coinbase-tag <text>` | none | the pool's tag in every pooled coinbase, at most 81 bytes; live (see "Live settings") |
 | `--watch-config <bool>` | true | re-read the settings file when it changes (see "Live settings") |
 | `--hash-limit <period>=<rate>,...` | none | the hashrate brackets an identity may not exceed; live (see "Hashrate limiter") |
+| `--hash-limit-sigma <n>` | 0 | the statistical margin on every bracket, in standard deviations of the reading; live |
 | `--ban-secs <n>` | 86400 | how long a ban runs; live |
 | `--ban-escalation <factor>` | 1 | the factor each repeat ban is longer by; live |
 | `--public-gateway-tag <text>` | none | the public gateway's secondary coinbase tag |
@@ -654,8 +655,13 @@ the cap. A reading is work over the whole period, not over the time the identity
 seen, so a miner that just started reads low until the period fills. A threshold is a hard
 line read on every share, and a reading wobbles around the miner's true rate (about 5% either
 way over two hours at the default share floor for a 3.5 TH/s miner), so a miner running at
-exactly the long bracket's threshold trips it within hours: set that threshold with margin
-over the rate the pool means to allow, or tell miners to stay some way under it.
+exactly the long bracket's threshold trips it within hours. `--hash-limit-sigma` sizes a
+margin to that wobble: a reading over `n` shares bans only when it exceeds the threshold by
+`sigma / sqrt(n)` of it, at most 25% however few shares it rests on, and the ban's reason
+names the rate that was allowed. With `--hash-limit-sigma 3`, a 3.5 TH/s miner sending 360
+shares in two hours is allowed 15.8% over the bracket's threshold, a three-sigma excursion it
+makes about once in seven hundred readings, while a miner 30% over is banned within the
+period. 0, the default, bans on the threshold itself.
 
 A share is placed at its header time, no earlier than 300 seconds before it was accepted: a
 gateway that reconnects replays the shares it queued while away, which would read as a burst
@@ -675,7 +681,8 @@ the bans under `limiter` and each banned miner's `banned_until`, `--bans` prints
 ### Live settings
 
 The settings named live in the table under "Configuration" (`fee`, `finder-bps`,
-`coinbase-tag`, `hash-limit`, `ban-secs`, `ban-escalation`) apply while the pool runs;
+`coinbase-tag`, `hash-limit`, `hash-limit-sigma`, `ban-secs`, `ban-escalation`) apply while
+the pool runs;
 every other setting applies at a restart. The pool reads them from its settings file
 (`--config`, or `ratum.toml` in `--data-dir`) again:
 

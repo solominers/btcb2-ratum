@@ -71,6 +71,11 @@ pub struct Options {
     #[arg(long, value_name = "PERIOD=RATE", value_delimiter = ',')]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hash_limit: Vec<String>,
+    /// The statistical margin on every bracket, in standard deviations of the reading: a
+    /// reading over n shares bans only when it exceeds the threshold by sigma / sqrt(n) of
+    /// it (at most 25%). 0 bans on the threshold itself. Live.
+    #[arg(long)]
+    pub hash_limit_sigma: Option<f64>,
     /// How long a ban runs; with `--ban`, the length of that ban. Live.
     #[arg(long)]
     pub ban_secs: Option<u64>,
