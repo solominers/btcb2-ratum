@@ -46,6 +46,11 @@ pub const SAVED_SPLITS: usize = 8;
 /// rest of the version (the minimum version and any signalling a deployment requires).
 pub const VERSION_ROLLING_MASK: u32 = 0x1fff_e000;
 
+/// How many coinbase tags a connection accepts at once: the one in force and the ones
+/// before it, for jobs built before a change. A gateway builds a job a template (40 seconds)
+/// and keeps a few, so two changes within a job's life is already more than a pool sees.
+pub const ACCEPTED_TAGS: usize = 4;
+
 /// What a share is checked against: the configuration sent to every gateway (its version 1
 /// form; a version 3 session adds the version 3 fields) and the pool's own share rules.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -229,6 +234,10 @@ fn allows_min_difficulty_blocks(chain: Option<rpc::Chain>) -> bool {
 #[derive(Debug)]
 pub struct Verifier<'a> {
     policy: &'a SharePolicy,
+    /// The coinbase tags a share on this connection may carry, the one in force first: a
+    /// tag change reaches the gateway at once, but the jobs it built before it carry the
+    /// tag they were built with, so a few earlier tags stay accepted (`accept_tag`).
+    tags: Vec<String>,
     jobs: Vec<Option<jobs::JobState>>,
     splits: DictatedSplits,
     tip: Option<[u8; 32]>,
@@ -252,6 +261,7 @@ impl<'a> Verifier<'a> {
     pub fn new(policy: &'a SharePolicy) -> Self {
         Self {
             policy,
+            tags: vec![policy.config.coinbase_tag.clone()],
             jobs: vec![None; MAX_JOBS],
             splits: DictatedSplits::default(),
             tip: None,
@@ -262,6 +272,19 @@ impl<'a> Verifier<'a> {
             installed_coinbase_bytes: 0,
             installed_coinbase_bytes_cap: MAX_INSTALLED_COINBASE_BYTES,
         }
+    }
+
+    /// Makes `tag` the tag in force for this connection's shares, keeping the ones before it
+    /// accepted for the jobs built under them.
+    pub fn accept_tag(&mut self, tag: String) {
+        self.tags.retain(|t| *t != tag);
+        self.tags.insert(0, tag);
+        self.tags.truncate(ACCEPTED_TAGS);
+    }
+
+    #[cfg(test)]
+    pub fn tags(&self) -> &[String] {
+        &self.tags
     }
 
     pub fn tip(&self) -> Option<[u8; 32]> {

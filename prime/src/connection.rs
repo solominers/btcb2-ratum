@@ -162,6 +162,7 @@ pub fn handle(stream: TcpStream, server: &Server) -> io::Result<()> {
         waker,
         channel,
         verifier: Verifier::new(&server.share_policy),
+        tag_generation: server.tag_generation(),
         reported_unpayable: BoundedSet::new(shares::MAX_REPORTED_UNPAYABLE),
         held: Vec::new(),
         txn_requests: VecDeque::new(),
@@ -177,10 +178,13 @@ pub fn handle(stream: TcpStream, server: &Server) -> io::Result<()> {
         identity,
     };
 
+    // The tag in force, which may differ from the startup policy's the verifier began with.
+    conn.verifier.accept_tag(server.coinbase_tag());
     match protocol_version {
         ProtocolVersion::V1 => {
-            conn.send_mining(&server.config_payload, true)?;
-            debug!("[{peer}] sent v1 0x99 config ({} bytes, signed)", server.config_payload.len());
+            let payload = server.config_payload_v1();
+            conn.send_mining(&payload, true)?;
+            debug!("[{peer}] sent v1 0x99 config ({} bytes, signed)", payload.len());
         }
         ProtocolVersion::V3 { resume } => conn.start_v3_session(resume.as_ref())?,
     }
@@ -196,6 +200,8 @@ struct Connection<'a> {
     waker: Arc<Waker>,
     channel: ServerChannel,
     verifier: Verifier<'a>,
+    /// The generation of the coinbase tag last sent to this gateway (`Server::tag_generation`).
+    tag_generation: u64,
     /// The unpayable identities already reported at warn level on this connection. One
     /// connection carries every miner on a gateway, so each bad username is named once
     /// rather than only the first; the set is bounded so a gateway sending many of them
@@ -333,6 +339,30 @@ impl Connection<'_> {
         Ok(())
     }
 
+    /// Sends the gateway the configuration again when the coinbase tag changed since it was
+    /// last sent: the gateway's next jobs carry the new tag, and its shares on the jobs built
+    /// before still verify (`Verifier::accept_tag`).
+    fn send_tag_if_changed(&mut self) -> io::Result<()> {
+        let generation = self.server.tag_generation();
+        if generation == self.tag_generation {
+            return Ok(());
+        }
+        self.tag_generation = generation;
+        let tag = self.server.coinbase_tag();
+        let payload = match &self.v3 {
+            Some(v3) => self.server.config_payload_v3(&v3.token),
+            None => self.server.config_payload_v1(),
+        };
+        self.send_mining(&payload, true)?;
+        self.verifier.accept_tag(tag.clone());
+        info!(
+            "[{}]   <- config sent again: coinbase tag {tag:?}; the gateway's next jobs carry \
+             it, its shares on earlier jobs still verify",
+            self.peer
+        );
+        Ok(())
+    }
+
     fn send_keepalive(&mut self) -> io::Result<()> {
         self.send_frame(framing::cmd::HELLO_OR_PING, &[], false)?;
         debug!("[{}]   <- keepalive ping", self.peer);
@@ -358,6 +388,7 @@ impl Connection<'_> {
         let peer = self.peer;
         loop {
             self.notify_tip_change()?;
+            self.send_tag_if_changed()?;
             self.expire_txn_requests()?;
             self.expire_parent_holds()?;
             self.answer_orphaned_held()?;

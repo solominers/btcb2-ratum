@@ -19,7 +19,7 @@ use std::time::{Duration, SystemTime};
 /// The settings a reload applies, by their names in the file. Every other setting applies at
 /// a restart.
 pub const LIVE_SETTINGS: &[&str] =
-    &["fee", "finder-bps", "hash-limit", "ban-secs", "ban-escalation"];
+    &["fee", "finder-bps", "coinbase-tag", "hash-limit", "ban-secs", "ban-escalation"];
 
 /// How often the settings file is looked at for a change.
 const WATCH_INTERVAL: Duration = Duration::from_secs(2);
@@ -28,10 +28,27 @@ const WATCH_INTERVAL: Duration = Duration::from_secs(2);
 const SETTLE: Duration = Duration::from_secs(1);
 
 /// What the pool keeps between readings: the modification time of the file as last applied,
-/// so the watcher applies a change once and not again after `--set` wrote it.
-#[derive(Default)]
+/// so the watcher applies a change once and not again after `--set` wrote it, and the
+/// coinbase tag in force, which every connection sends its gateway.
 pub struct State {
     applied_mtime: Mutex<Option<SystemTime>>,
+    pub coinbase_tag: Mutex<CoinbaseTag>,
+}
+
+/// The coinbase tag in force and how many times it has changed since startup.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CoinbaseTag {
+    pub text: String,
+    pub generation: u64,
+}
+
+impl State {
+    pub fn new(coinbase_tag: String) -> Self {
+        Self {
+            applied_mtime: Mutex::new(None),
+            coinbase_tag: Mutex::new(CoinbaseTag { text: coinbase_tag, generation: 0 }),
+        }
+    }
 }
 
 /// The live settings as the pool installs them.
@@ -39,6 +56,7 @@ pub struct State {
 pub struct Live {
     pub fees: Vec<FeeOutput>,
     pub finder_bps: u16,
+    pub coinbase_tag: String,
     pub rules: Rules,
 }
 
@@ -48,6 +66,7 @@ impl Live {
         Ok(Self {
             fees: settings::fees(o, chain)?,
             finder_bps: settings::finder_bps(o)?,
+            coinbase_tag: settings::coinbase_tag_of(o)?,
             rules: settings::limiter_rules(o)?,
         })
     }
@@ -58,7 +77,12 @@ impl Live {
             let l = lock(&server.ledger);
             (l.split_policy().fees.clone(), l.split_policy().finder_bps)
         };
-        Self { fees, finder_bps, rules: lock(&server.limiter).rules().clone() }
+        Self {
+            fees,
+            finder_bps,
+            coinbase_tag: server.coinbase_tag(),
+            rules: lock(&server.limiter).rules().clone(),
+        }
     }
 
     /// Installs these settings where each is read from; the lines describing what changed,
@@ -82,6 +106,14 @@ impl Live {
             ));
             lock(&server.ledger).set_finder_bps(self.finder_bps);
         }
+        if current.coinbase_tag != self.coinbase_tag {
+            changes.push(format!(
+                "coinbase-tag: {:?} (was {:?}); sent to every connected gateway, whose next \
+                 jobs carry it",
+                self.coinbase_tag, current.coinbase_tag
+            ));
+            server.set_coinbase_tag(self.coinbase_tag);
+        }
         if current.rules != self.rules {
             changes.push(format!(
                 "hashrate limiter: {} (was {})",
@@ -96,9 +128,10 @@ impl Live {
     /// The settings, one line each, as `--show-settings` prints them.
     pub fn describe(&self) -> String {
         format!(
-            "fee: {}\nfinder-bps: {}\n{}",
+            "fee: {}\nfinder-bps: {}\ncoinbase-tag: {:?}\n{}",
             fees_text(&self.fees),
             finder_text(self.finder_bps),
+            self.coinbase_tag,
             self.rules.describe()
         )
     }
@@ -346,6 +379,9 @@ mod tests {
         lock(&server.ledger).set_finder_bps(8_000);
         server.settings.config_path = Some(path.clone());
         server.settings.file_options = toml::from_str(text).unwrap();
+        // The fixture starts with the tag "RATUM"; these files name none, and as `main`
+        // starts a pool, the tag in force is the file's: none.
+        lock(&server.live.coinbase_tag).text = String::new();
         (server, path)
     }
 
@@ -371,6 +407,22 @@ mod tests {
         let text = reload(&server).unwrap();
         assert_eq!(Live::current(&server).finder_bps, 8_000, "removed: back to the default");
         assert!(!text.contains("restart"), "back to the startup value: {text}");
+
+        assert_eq!((server.coinbase_tag().as_str(), server.tag_generation()), ("", 0));
+        std::fs::write(&path, "coinbase-tag = \"NEWPOOL\"\n").unwrap();
+        let text = reload(&server).unwrap();
+        assert!(text.contains("coinbase-tag: \"NEWPOOL\" (was \"\")"), "{text}");
+        assert_eq!((server.coinbase_tag().as_str(), server.tag_generation()), ("NEWPOOL", 1));
+        assert_eq!(server.client_config().coinbase_tag, "NEWPOOL", "what the next hello is sent");
+        assert!(reload(&server).unwrap().contains("unchanged"));
+        assert_eq!(server.tag_generation(), 1, "the same tag again is no change");
+        std::fs::write(&path, "coinbase-tag = \"a\\u0000b\"\n").unwrap();
+        assert!(reload(&server).unwrap_err().contains("--coinbase-tag"));
+        assert_eq!(server.coinbase_tag(), "NEWPOOL", "refused: unchanged");
+        std::fs::write(&path, "min-diff = 16384\n").unwrap();
+        reload(&server).unwrap();
+        assert_eq!(server.coinbase_tag(), "", "removed: back to the default, an empty tag");
+        assert_eq!(server.tag_generation(), 2);
 
         let limits = "hash-limit = [\"1m=100T\", \"2h=3.5T\"]\nban-secs = 3600\n";
         std::fs::write(&path, limits).unwrap();
@@ -454,18 +506,19 @@ mod tests {
         let live = Live {
             fees: fee_outputs(&[(FEE_ADDRESS, 25), (ALICE, 100)]),
             finder_bps: 8_000,
+            coinbase_tag: "RATUM".into(),
             rules: rules.clone(),
         };
         assert_eq!(
             live.describe(),
             format!(
                 "fee: {FEE_ADDRESS} 25 bps (0.25%), {ALICE} 100 bps (1%) (125 bps together)\n\
-                 finder-bps: 8000 (80%)\nhash-limit: none\n"
+                 finder-bps: 8000 (80%)\ncoinbase-tag: \"RATUM\"\nhash-limit: none\n"
             )
         );
         assert_eq!(
-            Live { fees: Vec::new(), finder_bps: 0, rules }.describe(),
-            "fee: none\nfinder-bps: 0 (0%)\nhash-limit: none\n"
+            Live { fees: Vec::new(), finder_bps: 0, coinbase_tag: String::new(), rules }.describe(),
+            "fee: none\nfinder-bps: 0 (0%)\ncoinbase-tag: \"\"\nhash-limit: none\n"
         );
     }
 }

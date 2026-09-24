@@ -316,6 +316,7 @@ min-diff = 16384                          # smallest share difficulty credited, 
 | `--ledger-keep-shares <n>` | keep all | the shares retained on disk (see "Ledger and window") |
 | `--fee <address>=<bps>,...` | none | the operator fees, each an output of the coinbase; live (see "Live settings") |
 | `--finder-bps <n>` | 8000 | the finder's cut of what the fees leave, in basis points; live (see "The split") |
+| `--coinbase-tag <text>` | none | the pool's tag in every pooled coinbase, at most 81 bytes; live (see "Live settings") |
 | `--watch-config <bool>` | true | re-read the settings file when it changes (see "Live settings") |
 | `--hash-limit <period>=<rate>,...` | none | the hashrate brackets an identity may not exceed; live (see "Hashrate limiter") |
 | `--ban-secs <n>` | 86400 | how long a ban runs; live |
@@ -674,7 +675,7 @@ the bans under `limiter` and each banned miner's `banned_until`, `--bans` prints
 ### Live settings
 
 The settings named live in the table under "Configuration" (`fee`, `finder-bps`,
-`hash-limit`, `ban-secs`, `ban-escalation`) apply while the pool runs;
+`coinbase-tag`, `hash-limit`, `ban-secs`, `ban-escalation`) apply while the pool runs;
 every other setting applies at a restart. The pool reads them from its settings file
 (`--config`, or `ratum.toml` in `--data-dir`) again:
 
@@ -701,6 +702,13 @@ commands. `/stats.json` reports the fees under `pool.fees`.
 A fee change reaches a gateway with the next split it requests, one per template (every
 `bitcoind.work_update_seconds`, 40 by default, and on each new block); a block found on a job
 built before that pays the fees dictated for it.
+
+A coinbase tag change is sent to every connected gateway at once, as the configuration
+message the hello was answered with (both gateways apply one at any time); the gateway's
+next jobs carry the new tag. Its shares on the jobs built before still verify: a connection
+accepts the tag in force and the last few before it, and a block found on such a job carries
+the tag its job was built with. `/stats.json` reports the tag in force under
+`pool.coinbase_tag`.
 
 ### Ledger commands
 

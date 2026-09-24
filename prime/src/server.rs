@@ -37,8 +37,9 @@ pub struct Server {
     pub accepted_hashes: Mutex<AcceptedShareHashes>,
     pub ledger: Mutex<Ledger>,
     pub records: Mutex<BlockRecords>,
+    /// The share rules as the pool started: the configuration every gateway is sent, less
+    /// the coinbase tag, which is live (`coinbase_tag`).
     pub share_policy: SharePolicy,
-    pub config_payload: Vec<u8>,
     pub open_connections: AtomicUsize,
     /// The open connections from each address (`net::limit_key`: an IPv4 address, or an IPv6
     /// /64 prefix), which `--max-connections-per-ip` bounds.
@@ -64,12 +65,13 @@ impl Server {
         (ledger, records): (Ledger, BlockRecords),
         limiter: Limiter,
     ) -> io::Result<Self> {
-        let config_payload = share_policy.config.encode().map_err(|e| {
+        share_policy.config.encode().map_err(|e| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("cannot build the client config: {e}"),
             )
         })?;
+        let live = live::State::new(share_policy.config.coinbase_tag.clone());
         let sessions = Mutex::new(SessionStore::new(share_policy.config.prime_id));
         Ok(Self {
             settings,
@@ -81,12 +83,11 @@ impl Server {
             ledger: Mutex::new(ledger),
             records: Mutex::new(records),
             share_policy,
-            config_payload,
             open_connections: AtomicUsize::new(0),
             open_per_ip: Mutex::new(HashMap::new()),
             txn_cache: Mutex::new(TxnCache::default()),
             relayed_blocks: Mutex::new(BoundedSet::new(MAX_RELAYED_BLOCKS)),
-            live: live::State::default(),
+            live,
             limiter: Mutex::new(limiter),
             workers: Mutex::new(Workers::default()),
         })
@@ -117,13 +118,49 @@ impl Server {
         }
     }
 
+    /// The configuration a gateway is sent: the startup share rules with the coinbase tag in
+    /// force now.
+    pub fn client_config(&self) -> ClientConfig {
+        ClientConfig { coinbase_tag: self.coinbase_tag(), ..self.share_policy.config.clone() }
+    }
+
+    pub fn config_payload_v1(&self) -> Vec<u8> {
+        self.client_config().encode().expect("the config encoded at startup; the tag is checked")
+    }
+
     pub fn config_payload_v3(&self, token: &ResumeToken) -> Vec<u8> {
         ClientConfig {
             v3: Some(V3Config { resume_token: *token, bulk_framing: true, abw_disabled: false }),
-            ..self.share_policy.config.clone()
+            ..self.client_config()
         }
         .encode()
         .expect("the v1 config from the same policy encoded at startup")
+    }
+
+    /// The coinbase tag in force: `--coinbase-tag` as last applied (see `live`).
+    pub fn coinbase_tag(&self) -> String {
+        lock(&self.live.coinbase_tag).text.clone()
+    }
+
+    /// Counts the tag changes since startup, so a connection tells when the tag it sent its
+    /// gateway is no longer the one in force.
+    pub fn tag_generation(&self) -> u64 {
+        lock(&self.live.coinbase_tag).generation
+    }
+
+    /// Installs `tag` as the coinbase tag and wakes every connection to send it. Returns
+    /// whether it differed from the tag in force.
+    pub fn set_coinbase_tag(&self, tag: String) -> bool {
+        {
+            let mut t = lock(&self.live.coinbase_tag);
+            if t.text == tag {
+                return false;
+            }
+            t.text = tag;
+            t.generation += 1;
+        }
+        self.node_state.wake_connections();
+        true
     }
 }
 

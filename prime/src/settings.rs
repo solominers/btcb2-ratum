@@ -163,9 +163,7 @@ pub fn check(o: &Options, chain: Option<rpc::Chain>) -> Result<(), String> {
     fees(o, chain)?;
     finder_bps(o)?;
     limiter_rules(o)?;
-    if let Some(tag) = &o.coinbase_tag {
-        coinbase_tag(tag.clone())?;
-    }
+    coinbase_tag_of(o)?;
     valid(o.min_diff, "--min-diff", "a power of two", |n| n.is_power_of_two())?;
     if let Some(address) = &o.payout_address {
         payout::address_script(address, chain).ok_or_else(|| {
@@ -222,7 +220,7 @@ pub fn share_policy(o: &Options, chain: Option<rpc::Chain>) -> Result<SharePolic
         config: ClientConfig {
             payout_script: payout_script(o, chain)?,
             prime_id: PRIME_ID,
-            coinbase_tag: coinbase_tag(o.coinbase_tag.clone().unwrap_or_default())?,
+            coinbase_tag: coinbase_tag_of(o)?,
             min_difficulty: valid_or(
                 o.min_diff,
                 DEFAULT_MIN_DIFFICULTY,
@@ -252,6 +250,12 @@ impl Settings {
     pub fn hashrate_path(&self) -> Option<PathBuf> {
         self.data_dir.as_ref().map(|dir| dir.join(HASHRATE_FILE))
     }
+}
+
+/// The pool's coinbase tag `--coinbase-tag` names, empty by default. This is the one reading
+/// of the setting: startup and every reload use it.
+pub fn coinbase_tag_of(o: &Options) -> Result<String, String> {
+    coinbase_tag(o.coinbase_tag.clone().unwrap_or_default())
 }
 
 fn coinbase_tag(tag: String) -> Result<String, String> {

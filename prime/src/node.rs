@@ -102,7 +102,7 @@ impl NodeState {
         tip_changed || v.template.map(|s| s.bits) != previous_bits
     }
 
-    fn wake_connections(&self) {
+    pub fn wake_connections(&self) {
         for w in lock(&self.wakers).iter() {
             if let Err(e) = w.wake() {
                 debug!("could not wake a gateway connection thread: {e}");

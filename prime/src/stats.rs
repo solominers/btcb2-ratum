@@ -463,7 +463,7 @@ pub(crate) fn snapshot(server: &Server, history: &Mutex<HashrateHistory>) -> Val
         "pool": {
             "motd": server.settings.motd,
             "version": crate::VERSION,
-            "coinbase_tag": server.share_policy.config.coinbase_tag,
+            "coinbase_tag": server.coinbase_tag(),
             "prime_id": server.share_policy.config.prime_id,
             "payout_script": hex::encode(&server.share_policy.config.payout_script),
             "fee_bps": l.split_policy.fee_bps(),

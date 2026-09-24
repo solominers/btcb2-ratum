@@ -1128,7 +1128,37 @@ def hash_limit(stack: Stack, a: argparse.Namespace) -> None:
     ):
         fail("/stats.json does not report the new finder's cut")
 
-    step("passed: banned, refused, told, listed, unbanned, accepted again; a setting changed live")
+    step("the coinbase tag changed with --set reaches the connected gateway, and shares on "
+         "jobs built before and after the change are accepted")
+    stack.prime_command("--unban", MINER_ADDRESS)
+    accepted_before = len(stack.acceptances())
+    # The pool started with --coinbase-tag RATUM on its command line; the file is what a
+    # reload reads, so the earlier --set already made the tag the file's (none).
+    out = stack.prime_command("--set", "coinbase-tag=NEWTAG")
+    if 'coinbase-tag: "NEWTAG" (was "")' not in out:
+        fail(f"--set coinbase-tag: {out!r}")
+    if not stack.wait_until(
+        lambda: "config sent again: coinbase tag \"NEWTAG\"" in stack.pool_log(), 30,
+        lambda: "waiting for the pool to send the configuration again",
+    ):
+        fail(f"the pool did not send the gateway the new tag; see {stack.pool_log_path}")
+    if stack.gateway_bin == ROOT / "target/release/ratum-gateway" and not stack.wait_until(
+        lambda: 'tag "NEWTAG"' in gateway_log.read_text(errors="replace"), 30,
+        lambda: "waiting for the gateway to log the new configuration",
+    ):
+        fail(f"the gateway did not apply the new tag; see {gateway_log}")
+    if not stack.wait_until(
+        lambda: len(stack.acceptances()) >= accepted_before + 2, a.timeout,
+        lambda: f"{len(stack.acceptances())} share(s) accepted",
+    ):
+        fail(f"no shares accepted after the tag change; see {stack.pool_log_path}")
+    if "MissingPoolTag" in stack.pool_log():
+        fail("a share was refused for its tag after the change")
+    if stack.stats()["pool"]["coinbase_tag"] != "NEWTAG":
+        fail("/stats.json does not report the new tag")
+    print(f"  {len(stack.acceptances()) - accepted_before} share(s) accepted since the tag change")
+
+    step("passed: banned, refused, told, listed, unbanned, accepted again; settings and the tag changed live")
     stack.print_ledger(stack.stop_and_dump_ledger())
 
 

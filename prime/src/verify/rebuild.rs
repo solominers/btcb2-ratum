@@ -41,9 +41,11 @@ impl Verifier<'_> {
             return Err(RejectReason::BadCoinbase);
         }
 
-        let ParsedScriptSig { target_byte_index, tag_secondary } =
-            parse_script_sig(&parsed, config.prime_id, &config.coinbase_tag)
-                .ok_or(RejectReason::MissingPoolTag)?;
+        let ParsedScriptSig { target_byte_index, tag_secondary } = self
+            .tags
+            .iter()
+            .find_map(|tag| parse_script_sig(&parsed, config.prime_id, tag))
+            .ok_or(RejectReason::MissingPoolTag)?;
         if usize::from(job.target_byte_index) != target_byte_index {
             return Err(RejectReason::TargetMismatch);
         }

@@ -212,6 +212,48 @@ fn rejects_a_coinbase_without_the_pool_tag() {
     assert_eq!(v.checked(&share, None, NOW), Err(RejectReason::MissingPoolTag));
 }
 
+#[test]
+fn a_tag_change_keeps_the_jobs_built_under_the_old_tag_verifying() {
+    let mut renamed = policy();
+    renamed.config.coinbase_tag = "NEWPOOL".to_string();
+    let (old_cb, old_index) = coinbase_sections(shared_policy(), &split().outputs);
+    let (new_cb, new_index) = coinbase_sections(&renamed, &split().outputs);
+    let mut v = verifier();
+    record(&mut v, &split(), &[], NOW);
+    let on_new = share_on(job_section(new_index), new_cb.clone());
+    assert_eq!(
+        v.checked(&on_new, None, NOW),
+        Err(RejectReason::MissingPoolTag),
+        "a tag the pool never sent this gateway"
+    );
+
+    v.accept_tag("NEWPOOL".to_string());
+    assert_eq!(v.tags(), ["NEWPOOL", "RATUM"], "the tag in force first, the old one kept");
+    // The fixture nonce meets the share target only on the fixture coinbase, so the target
+    // is left out: what is checked is the tag.
+    assert!(
+        v.rebuild_checked_ignoring_target(&on_new, None, NOW).is_ok(),
+        "a job built under the new tag"
+    );
+    let on_old = share_on(job_section(old_index), old_cb);
+    assert!(
+        v.rebuild_checked_ignoring_target(&on_old, None, NOW).is_ok(),
+        "a job built before the change"
+    );
+
+    v.accept_tag("RATUM".to_string());
+    assert_eq!(v.tags(), ["RATUM", "NEWPOOL"], "back again: no duplicate, the order kept");
+    for n in 0..super::super::ACCEPTED_TAGS + 2 {
+        v.accept_tag(format!("T{n}"));
+    }
+    assert_eq!(v.tags().len(), super::super::ACCEPTED_TAGS, "bounded");
+    assert_eq!(
+        v.rebuild_checked_ignoring_target(&on_old, None, NOW),
+        Err(RejectReason::MissingPoolTag),
+        "a tag changed away from long enough ago is no longer accepted"
+    );
+}
+
 fn widen_prime_push(
     cb: &CoinbaseSection,
     target_byte_index: usize,
