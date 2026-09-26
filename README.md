@@ -320,6 +320,7 @@ min-diff = 16384                          # smallest share difficulty credited, 
 | `--watch-config <bool>` | true | re-read the settings file when it changes (see "Live settings") |
 | `--hash-limit <period>=<rate>,...` | none | the hashrate brackets an identity may not exceed; live (see "Hashrate limiter") |
 | `--hash-limit-sigma <n>` | 0 | the statistical margin on every bracket, in standard deviations of the reading; live |
+| `--hash-limit-exempt <address>,...` | none | addresses the brackets do not apply to (an operator's own rig under test); an operator's ban still applies; live |
 | `--ban-secs <n>` | 86400 | how long a `--ban` runs; live |
 | `--ban-escalation <factor>` | 1 | the factor each repeat ban is longer by; live |
 | `--public-gateway-tag <text>` | none | the public gateway's secondary coinbase tag |
@@ -700,7 +701,7 @@ until it stops.
 ### Live settings
 
 The settings named live in the table under "Configuration" (`fee`, `finder-bps`,
-`coinbase-tag`, `hash-limit`, `hash-limit-sigma`, `ban-secs`, `ban-escalation`) apply while
+`coinbase-tag`, `hash-limit`, `hash-limit-sigma`, `hash-limit-exempt`, `ban-secs`, `ban-escalation`) apply while
 the pool runs;
 every other setting applies at a restart. The pool reads them from its settings file
 (`--config`, or `ratum.toml` in `--data-dir`) again:

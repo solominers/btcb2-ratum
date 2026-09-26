@@ -76,6 +76,12 @@ pub struct Options {
     /// it (at most 25%). 0 bans on the threshold itself. Live.
     #[arg(long)]
     pub hash_limit_sigma: Option<f64>,
+    /// Addresses the hashrate limiter leaves alone (an operator's own rig under test, say);
+    /// comma-separated on the command line, a list in the file. An operator's ban still
+    /// applies. Live.
+    #[arg(long, value_name = "ADDRESS", value_delimiter = ',')]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hash_limit_exempt: Vec<String>,
     /// How long a ban runs; with `--ban`, the length of that ban. Live.
     #[arg(long)]
     pub ban_secs: Option<u64>,

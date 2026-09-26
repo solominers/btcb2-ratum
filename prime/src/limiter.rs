@@ -81,11 +81,13 @@ pub struct Rules {
     /// from `n` share arrivals wobbles by about `1 / sqrt(n)` of itself. 0 bans on the
     /// threshold itself.
     pub sigma: f64,
+    /// Identities the brackets do not apply to, as `address::canonical` gives them.
+    pub exempt: std::collections::BTreeSet<String>,
 }
 
 impl Default for Rules {
     fn default() -> Self {
-        Self { brackets: Vec::new(), ban_secs: ratum::SECS_PER_DAY, escalation: 1.0, sigma: 0.0 }
+        Self { brackets: Vec::new(), ban_secs: ratum::SECS_PER_DAY, escalation: 1.0, sigma: 0.0, exempt: Default::default() }
     }
 }
 
@@ -120,8 +122,13 @@ impl Rules {
             .iter()
             .map(|b| format!("{} {}", period_text(b.period_secs), hashrate_text(b.threshold_hs)))
             .collect();
+        let exempt = if self.exempt.is_empty() {
+            String::new()
+        } else {
+            format!("hash-limit-exempt: {}\n", self.exempt.iter().cloned().collect::<Vec<_>>().join(", "))
+        };
         format!(
-            "hash-limit: {} (over any bracket: refused while over)\nhash-limit-sigma: {}\nban-secs: {} ({})\nban-escalation: {}\n",
+            "hash-limit: {} (over any bracket: refused while over)\nhash-limit-sigma: {}\n{exempt}ban-secs: {} ({})\nban-escalation: {}\n",
             each.join(", "),
             self.sigma,
             self.ban_secs,
@@ -139,6 +146,7 @@ impl Rules {
             "ban_secs": self.ban_secs,
             "ban_escalation": self.escalation,
             "sigma": self.sigma,
+            "exempt": self.exempt,
         })
     }
 }
@@ -167,11 +175,14 @@ pub fn parse_bracket(text: &str) -> Result<Bracket, String> {
 
 /// The rules `entries` name (each `parse_bracket`), sorted by period: at most `MAX_BRACKETS`,
 /// no two on one period.
+pub const MAX_EXEMPT: usize = 64;
+
 pub fn rules_from(
     entries: &[String],
     ban_secs: u64,
     escalation: f64,
     sigma: f64,
+    exempt: &[String],
 ) -> Result<Rules, String> {
     let mut brackets = Vec::new();
     for entry in entries.iter().map(|e| e.trim()).filter(|e| !e.is_empty()) {
@@ -200,7 +211,17 @@ pub fn rules_from(
     if !sigma.is_finite() || !(0.0..=MAX_SIGMA).contains(&sigma) {
         return Err(format!("--hash-limit-sigma must be from 0 (refuse on the threshold itself) to {MAX_SIGMA}"));
     }
-    Ok(Rules { brackets, ban_secs, escalation, sigma })
+    let mut exempt_set = std::collections::BTreeSet::new();
+    for a in exempt.iter().map(|a| a.trim()).filter(|a| !a.is_empty()) {
+        if a.len() < 14 || a.len() > 100 || !a.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return Err(format!("--hash-limit-exempt {a:?} is not an address"));
+        }
+        exempt_set.insert(ratum::bitcoin::address::canonical(a).into_owned());
+    }
+    if exempt_set.len() > MAX_EXEMPT {
+        return Err(format!("--hash-limit-exempt names {} addresses; at most {MAX_EXEMPT}", exempt_set.len()));
+    }
+    Ok(Rules { brackets, ban_secs, escalation, sigma, exempt: exempt_set })
 }
 
 pub fn parse_period(text: &str) -> Option<u64> {
@@ -556,6 +577,10 @@ impl Limiter {
         if self.rules.brackets.is_empty() {
             return None;
         }
+        if self.rules.exempt.contains(identity) {
+            self.throttled_since.remove(identity);
+            return None;
+        }
         let longest = self.rules.longest_period();
         let Some(ring) = self.rings.get_mut(identity) else {
             self.throttled_since.remove(identity);
@@ -632,6 +657,7 @@ impl Limiter {
         let mut v: Vec<Throttled> = self
             .rings
             .iter()
+            .filter(|(identity, _)| !self.rules.exempt.contains(*identity))
             .filter_map(|(identity, ring)| {
                 let reason = over(&self.rules, ring, now, None)?;
                 let home = self.home_of(identity, now);
@@ -785,7 +811,7 @@ mod tests {
 
     fn rules(entries: &[&str]) -> Rules {
         let entries: Vec<String> = entries.iter().map(|e| e.to_string()).collect();
-        rules_from(&entries, ratum::SECS_PER_DAY, 1.0, 0.0).unwrap()
+        rules_from(&entries, ratum::SECS_PER_DAY, 1.0, 0.0, &[]).unwrap()
     }
 
     fn starter() -> Rules {
@@ -830,13 +856,13 @@ mod tests {
             let e = parse_bracket(entry).unwrap_err();
             assert!(e.contains(what), "{entry}: {e}");
         }
-        let twice = rules_from(&["5m=1T".into(), "300s=2T".into()], 60, 1.0, 0.0).unwrap_err();
+        let twice = rules_from(&["5m=1T".into(), "300s=2T".into()], 60, 1.0, 0.0, &[]).unwrap_err();
         assert!(twice.contains("twice"), "{twice}");
-        assert!(rules_from(&[], 0, 1.0, 0.0).unwrap_err().contains("--ban-secs"));
-        assert!(rules_from(&[], 60, 0.5, 0.0).unwrap_err().contains("--ban-escalation"));
-        assert!(rules_from(&[], 60, 1.0, -1.0).unwrap_err().contains("--hash-limit-sigma"));
-        assert!(rules_from(&[], 60, 1.0, 11.0).unwrap_err().contains("--hash-limit-sigma"));
-        assert!(rules_from(&[], 60, 1.0, 0.0).unwrap().brackets.is_empty(), "no brackets: no limit");
+        assert!(rules_from(&[], 0, 1.0, 0.0, &[]).unwrap_err().contains("--ban-secs"));
+        assert!(rules_from(&[], 60, 0.5, 0.0, &[]).unwrap_err().contains("--ban-escalation"));
+        assert!(rules_from(&[], 60, 1.0, -1.0, &[]).unwrap_err().contains("--hash-limit-sigma"));
+        assert!(rules_from(&[], 60, 1.0, 11.0, &[]).unwrap_err().contains("--hash-limit-sigma"));
+        assert!(rules_from(&[], 60, 1.0, 0.0, &[]).unwrap().brackets.is_empty(), "no brackets: no limit");
     }
 
     #[test]
@@ -897,6 +923,27 @@ mod tests {
         assert!(l.ban_of("four", now).is_none() && l.active_bans(now).is_empty());
         assert_eq!(l.check("four", &G, now + 7201), None, "the reading emptied");
         assert!(l.throttled(now + 7201).is_empty());
+    }
+
+    #[test]
+    fn an_exempt_address_is_never_refused_and_the_exemption_reads_as_an_address() {
+        let entries: Vec<String> = ["1m=100T", "2h=3.5T"].iter().map(|e| e.to_string()).collect();
+        let upper = "BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4".to_string();
+        let r = rules_from(&entries, ratum::SECS_PER_DAY, 1.0, 0.0, &[upper.clone(), " ".into()]).unwrap();
+        assert!(r.exempt.contains("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"), "kept as the pool keys identities: {:?}", r.exempt);
+        assert!(r.describe().contains("hash-limit-exempt: bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4\n"), "{}", r.describe());
+        assert!(rules_from(&entries, 60, 1.0, 0.0, &["not an address!".into()]).unwrap_err().contains("--hash-limit-exempt"));
+        let mut l = Limiter::new(r);
+        // 40 TH/s, ten times the cap, for three hours: never refused, never listed as throttled.
+        let diff = work_for(40.0 * T, 20.0);
+        for i in 0..(3 * 3600 / 20) {
+            let now = 1_000_000 + i * 20;
+            assert_eq!(share(&mut l, "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", &G, now, diff, now), None, "share {i}");
+        }
+        assert!(l.throttled(1_000_000 + 3 * 3600).is_empty());
+        // The samples were kept: lifting the exemption refuses at once.
+        l.set_rules(rules(&["1m=100T", "2h=3.5T"]));
+        assert!(l.check("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", &G, 1_000_000 + 3 * 3600).is_some());
     }
 
     #[test]
@@ -1062,7 +1109,7 @@ mod tests {
         let path = dir.join("bans.redb");
         let _ = std::fs::remove_file(&path);
         let db = Arc::new(redb::Database::create(&path).unwrap());
-        let rules = rules_from(&["1m=1T".into()], 100, 2.0, 0.0).unwrap();
+        let rules = rules_from(&["1m=1T".into()], 100, 2.0, 0.0, &[]).unwrap();
         assert_eq!(
             (rules.ban_length(0), rules.ban_length(1), rules.ban_length(3)),
             (100, 200, 800)

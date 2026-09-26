@@ -19,7 +19,7 @@ use std::time::{Duration, SystemTime};
 /// The settings a reload applies, by their names in the file. Every other setting applies at
 /// a restart.
 pub const LIVE_SETTINGS: &[&str] =
-    &["fee", "finder-bps", "coinbase-tag", "hash-limit", "hash-limit-sigma", "ban-secs", "ban-escalation"];
+    &["fee", "finder-bps", "coinbase-tag", "hash-limit", "hash-limit-sigma", "hash-limit-exempt", "ban-secs", "ban-escalation"];
 
 /// How often the settings file is looked at for a change.
 const WATCH_INTERVAL: Duration = Duration::from_secs(2);
