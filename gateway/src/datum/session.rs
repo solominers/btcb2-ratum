@@ -30,7 +30,6 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-const SHARE_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Runs one DATUM connection to its end. `resume_token` is the token the last version 3
 /// configuration carried, sent in the hello and replaced by the one this connection receives.
@@ -52,7 +51,7 @@ pub(super) enum SessionError {
     Channel(#[from] channel::Error),
     #[error("no message from the pool for {0:?}")]
     GlobalTimeout(Duration),
-    #[error("no share accepted for {0:?}")]
+    #[error("no answer to a share for {0:?}")]
     ShareAckTimeout(Duration),
     #[error("could not resolve {0}")]
     Resolve(String),
@@ -69,8 +68,8 @@ struct Session<'a> {
     socket: PolledSocket,
     channel: ClientChannel,
     last_server_message_at: Instant,
-    last_share_sent_at: Option<Instant>,
-    last_share_accepted_at: Option<Instant>,
+    /// Whether the pool still answers the shares sent to it.
+    shares_answered: shares::ShareWatchdog,
     sent_sections: Vec<Option<shares::SentSections>>,
     /// The newest coinbaser request sent and not yet answered, with the template whose job it
     /// is for. Sending a request replaces the one held, since only the newest template's
@@ -149,8 +148,7 @@ impl<'a> Session<'a> {
             socket,
             channel,
             last_server_message_at: Instant::now(),
-            last_share_sent_at: None,
-            last_share_accepted_at: None,
+            shares_answered: shares::ShareWatchdog::default(),
             sent_sections: vec![None; slots],
             awaiting_coinbaser: None,
         })
@@ -179,12 +177,8 @@ impl<'a> Session<'a> {
             if self.last_server_message_at.elapsed() >= self.global_timeout {
                 return Err(SessionError::GlobalTimeout(self.global_timeout));
             }
-            if let (Some(sent), Some(acked)) =
-                (self.last_share_sent_at, self.last_share_accepted_at)
-                && sent > acked
-                && sent.duration_since(acked) >= SHARE_ACK_TIMEOUT
-            {
-                return Err(SessionError::ShareAckTimeout(SHARE_ACK_TIMEOUT));
+            if self.shares_answered.pool_silent() {
+                return Err(SessionError::ShareAckTimeout(shares::ShareWatchdog::TIMEOUT));
             }
 
             self.send_pending()?;

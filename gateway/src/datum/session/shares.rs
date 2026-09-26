@@ -15,7 +15,49 @@ use ratum::header::{FLAG_USE_TIME_OFFSET, V2_FLAG};
 use ratum::target;
 use std::time::{Duration, Instant};
 
-const SHARE_ACK_GRACE: Duration = Duration::from_secs(25);
+/// Notices a pool that has stopped answering shares on a connection that is otherwise up (the
+/// pool's messages keep the global timeout at bay, its answers to shares are what a miner
+/// needs), so the connection is made again.
+///
+/// Every verdict counts as an answer, a rejection as much as an acceptance: a pool refusing a
+/// stale share, or one over the hashrate limit, is answering. Counting acceptances alone
+/// dropped the connection of any rig that sends a share every half minute or so (a few TH/s
+/// at the pool's minimum difficulty) whenever one of its shares was rejected, since the next
+/// share was then sent `TIMEOUT` after the last acceptance.
+#[derive(Default)]
+pub(super) struct ShareWatchdog {
+    last_sent: Option<Instant>,
+    last_answered: Option<Instant>,
+}
+
+impl ShareWatchdog {
+    /// How long after the last answer a share may be sent before the pool counts as silent.
+    pub(super) const TIMEOUT: Duration = Duration::from_secs(30);
+    /// A share sent this long after the one before it starts the clock afresh: the pool is
+    /// not silent for a miner that was.
+    const GRACE: Duration = Duration::from_secs(25);
+
+    pub(super) fn sent(&mut self, now: Instant) {
+        if self.last_sent.is_none_or(|t| now.duration_since(t) > Self::GRACE) {
+            self.last_answered = Some(now);
+        }
+        self.last_sent = Some(now);
+    }
+
+    pub(super) fn answered(&mut self, now: Instant) {
+        self.last_answered = Some(now);
+    }
+
+    /// Whether the newest share was sent `TIMEOUT` or more after the pool's last answer.
+    pub(super) fn pool_silent(&self) -> bool {
+        match (self.last_sent, self.last_answered) {
+            (Some(sent), Some(answered)) => {
+                sent > answered && sent.duration_since(answered) >= Self::TIMEOUT
+            }
+            _ => false,
+        }
+    }
+}
 
 /// Which sections of a job the pool has already received on this connection, so a share
 /// carries each once.
@@ -84,9 +126,7 @@ impl Session<'_> {
                 warn!("DATUM share rejected: {what}: {reason:?} ({})", reason.code());
             }
         }
-        if accepted {
-            self.last_share_accepted_at = Some(Instant::now());
-        }
+        self.shares_answered.answered(Instant::now());
     }
 
     pub(super) fn send_pending(&mut self) -> Result<(), SessionError> {
@@ -176,11 +216,7 @@ impl Session<'_> {
             if share.is_block { " BLOCK" } else { "" }
         );
         self.send_mining(&submit.encode())?;
-        let now = Instant::now();
-        if self.last_share_sent_at.is_none_or(|t| now.duration_since(t) > SHARE_ACK_GRACE) {
-            self.last_share_accepted_at = Some(now);
-        }
-        self.last_share_sent_at = Some(now);
+        self.shares_answered.sent(Instant::now());
         Ok(())
     }
 }
@@ -272,6 +308,50 @@ mod tests {
         t.txns = vec![crate::template::Txn { raw: vec![1], txid: [3; 32], witness_hash: [4; 32] }];
         let inputs = JobInputs { abw, ..JobInputs::new(0, Arc::new(t)) };
         Arc::new(build(&config(), inputs).unwrap())
+    }
+
+    const S: Duration = Duration::from_secs(1);
+
+    #[test]
+    fn a_pool_that_answers_no_share_for_the_timeout_is_silent() {
+        let t0 = Instant::now();
+        let mut w = ShareWatchdog::default();
+        w.sent(t0);
+        w.sent(t0 + 20 * S);
+        assert!(!w.pool_silent(), "20 s without an answer is within the timeout");
+        w.sent(t0 + 30 * S);
+        assert!(w.pool_silent(), "a share sent 30 s after the last answer");
+    }
+
+    #[test]
+    fn a_rejection_is_an_answer() {
+        let t0 = Instant::now();
+        let mut w = ShareWatchdog::default();
+        w.sent(t0);
+        w.answered(t0 + 9 * S); // the pool's StaleBlock for it, say
+        w.sent(t0 + 20 * S);
+        w.sent(t0 + 32 * S);
+        assert!(!w.pool_silent(), "the pool answered 23 s before the newest share");
+        w.sent(t0 + 39 * S);
+        assert!(w.pool_silent(), "and then nothing for 30 s");
+    }
+
+    #[test]
+    fn a_share_after_a_quiet_spell_starts_the_clock_afresh() {
+        let t0 = Instant::now();
+        let mut w = ShareWatchdog::default();
+        w.sent(t0);
+        w.sent(t0 + 26 * S);
+        assert!(
+            !w.pool_silent(),
+            "more than the grace after the last share: not the pool's silence"
+        );
+        w.sent(t0 + 26 * S + ShareWatchdog::TIMEOUT);
+        assert!(!w.pool_silent(), "the same again");
+        w.sent(t0 + 26 * S + ShareWatchdog::TIMEOUT + 25 * S);
+        assert!(!w.pool_silent(), "25 s is within the grace, but only 25 s since the fresh start");
+        w.sent(t0 + 26 * S + ShareWatchdog::TIMEOUT + 25 * S + 5 * S);
+        assert!(w.pool_silent(), "two shares within the grace and 30 s with no answer");
     }
 
     #[test]
