@@ -1,9 +1,11 @@
 # RATUM
 
 This is a modified version of [ratum](https://github.com/iohzrd/ratum) by iohzrd, changed by
-solominers from September 2026 (a solo-lottery pool: fee outputs, a finder's cut, carried
-work, a per-address hashrate limiter, live settings). It stays under the GNU Affero General
-Public License, version 3 or later; see [LICENSE](LICENSE).
+solominers from September 2026 (fee outputs, an optional finder's cut, carried work, an
+optional per-address hashrate limiter, live settings), and run here as the BTCB2 Pool: a
+DATUM-only pool with shared TIDES payouts, no finder's cut (`--finder-bps` defaults to 0) and
+no hashrate limit. It stays under the GNU Affero General Public License, version 3 or later;
+see [LICENSE](LICENSE).
 
 ## Gateway
 
@@ -315,7 +317,7 @@ min-diff = 16384                          # smallest share difficulty credited, 
 | `--window <multiple>` | 8 | the window's work as a multiple of the network difficulty |
 | `--ledger-keep-shares <n>` | keep all | the shares retained on disk (see "Ledger and window") |
 | `--fee <address>=<bps>,...` | none | the operator fees, each an output of the coinbase; live (see "Live settings") |
-| `--finder-bps <n>` | 8000 | the finder's cut of what the fees leave, in basis points; live (see "The split") |
+| `--finder-bps <n>` | 0 | the finder's cut of what the fees leave, in basis points; live (see "The split") |
 | `--coinbase-tag <text>` | none | the pool's tag in every pooled coinbase, at most 81 bytes; live (see "Live settings") |
 | `--watch-config <bool>` | true | re-read the settings file when it changes (see "Live settings") |
 | `--hash-limit <period>=<rate>,...` | none | the hashrate brackets an identity may not exceed; live (see "Hashrate limiter") |
@@ -494,7 +496,7 @@ served sets the other end of that range: at a floor of 8192 a 1 TH/s miner submi
 ### The split
 
 One ledger serves every gateway. A block's value goes, in this order: the operator fees, as
-their own outputs; the finder's cut, `--finder-bps` of what the fees leave (8000, 80%, by
+their own outputs; the finder's cut, `--finder-bps` of what the fees leave (0, none, by
 default; live), to the identity of the connection the split was dictated to; and the rest to
 the miners of every gateway in proportion to their weight in the window, the finder's own
 window share included (paid in one output with its cut). A window that pays nobody (empty,

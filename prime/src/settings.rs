@@ -23,8 +23,8 @@ const DEFAULT_MAX_CONNECTIONS_PER_IP: usize = 32;
 const DEFAULT_LISTEN: &str = "0.0.0.0:28915";
 const DEFAULT_MOTD: &str = "RATUM Prime";
 const DEFAULT_WINDOW_MULTIPLE: f64 = 8.0;
-/// The finder's cut by default: 80% of what the fees leave.
-const DEFAULT_FINDER_BPS: u16 = 8_000;
+/// The finder's cut by default: none. The whole reward after the fees goes to the window.
+const DEFAULT_FINDER_BPS: u16 = 0;
 /// The id written in every coinbase's scriptSig and every resume token; a gateway resumes only
 /// under a nonzero one.
 const PRIME_ID: u64 = 1;

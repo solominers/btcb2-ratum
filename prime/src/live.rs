@@ -376,7 +376,7 @@ mod tests {
         let path = scratch_file(text);
         let mut server = server_with(&[(ALICE, 1)]);
         // The default finder's cut, as `main` sets it: a file naming none changes nothing.
-        lock(&server.ledger).set_finder_bps(8_000);
+        lock(&server.ledger).set_finder_bps(0);
         server.settings.config_path = Some(path.clone());
         server.settings.file_options = toml::from_str(text).unwrap();
         // The fixture starts with the tag "RATUM"; these files name none, and as `main`
@@ -401,11 +401,11 @@ mod tests {
         std::fs::write(&path, "min-diff = 16384\nfinder-bps = 5000\n").unwrap();
         let text = reload(&server).unwrap();
         assert!(Live::current(&server).fees.is_empty(), "a fee removed from the file is removed");
-        assert!(text.contains("finder-bps: 5000 (50%) (was 8000 (80%))"), "{text}");
+        assert!(text.contains("finder-bps: 5000 (50%) (was 0 (0%))"), "{text}");
         assert_eq!(Live::current(&server).finder_bps, 5_000);
         std::fs::write(&path, "min-diff = 16384\n").unwrap();
         let text = reload(&server).unwrap();
-        assert_eq!(Live::current(&server).finder_bps, 8_000, "removed: back to the default");
+        assert_eq!(Live::current(&server).finder_bps, 0, "removed: back to the default");
         assert!(!text.contains("restart"), "back to the startup value: {text}");
 
         assert_eq!((server.coinbase_tag().as_str(), server.tag_generation()), ("", 0));
